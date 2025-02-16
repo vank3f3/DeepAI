@@ -9,6 +9,7 @@ thinking_services:
     timeout: 10  # 秒
     retry: 3
     weight: 100  # 权重越高优先级越高
+    proxy: ""    # 可选代理设置，留空则不使用代理
   
   # 备用思考服务 - OpenAI
   - id: 2
@@ -19,6 +20,7 @@ thinking_services:
     timeout: 15
     retry: 2
     weight: 50
+    proxy: "http://127.0.0.1:7890"  # HTTP代理示例
 
 # API通道配置
 channels:
@@ -28,6 +30,7 @@ channels:
     base_url: "https://api-inference.modelscope.cn"
     api_path: "/v1/chat/completions"
     timeout: 30
+    proxy: ""  # 不使用代理
   
   # OpenAI 通道
   "2":
@@ -35,6 +38,7 @@ channels:
     base_url: "https://api.openai.com"
     api_path: "/v1/chat/completions"
     timeout: 30
+    proxy: "socks5://127.0.0.1:7890"  # SOCKS5代理示例
   
   # Anthropic 通道
   "3":
@@ -42,6 +46,7 @@ channels:
     base_url: "https://api.anthropic.com"
     api_path: "/v1/messages"
     timeout: 30
+    proxy: "http://proxy.example.com:8080"  # HTTP代理示例
   
   # Moonshot 通道
   "4":
@@ -49,9 +54,23 @@ channels:
     base_url: "https://api.moonshot.cn"
     api_path: "/v1/chat/completions"
     timeout: 30
+    proxy: ""  # 不使用代理
 
 # 全局配置
 global:
+  # 配置文件搜索路径
+  config_paths:
+    - "./config.yaml"           # 当前目录
+    - "./conf/config.yaml"      # conf子目录
+    - "/etc/deepai/config.yaml" # Linux系统配置目录
+    - "%PROGRAMDATA%/DeepAI/config.yaml"  # Windows系统配置目录
+
+  # 代理配置
+  proxy:
+    enabled: true  # 是否启用全局代理
+    default: ""    # 默认代理，留空则不使用。会被服务特定代理覆盖
+    allow_insecure: false  # 是否允许不安全的HTTPS连接
+  
   # 重试配置
   max_retries: 3
   default_timeout: 30
