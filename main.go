@@ -24,18 +24,28 @@ type ThinkingService struct {
     ID        int     `mapstructure:"id"`
     Name      string  `mapstructure:"name"`
     BaseURL   string  `mapstructure:"base_url"`
+    APIPath   string  `mapstructure:"api_path"`
     APIKey    string  `mapstructure:"api_key"`
     Timeout   int     `mapstructure:"timeout"`
     Retry     int     `mapstructure:"retry"`
     Weight    int     `mapstructure:"weight"`
 }
 
+// GetFullURL returns the complete API URL
+func (s *ThinkingService) GetFullURL() string {
+    return s.BaseURL + s.APIPath
+}
+
 type Channel struct {
     Name      string   `mapstructure:"name"`
     BaseURL   string   `mapstructure:"base_url"`
-    KeyPrefix string   `mapstructure:"key_prefix"`
+    APIPath   string   `mapstructure:"api_path"`
     Timeout   int      `mapstructure:"timeout"`
-    Models    []string `mapstructure:"models"`
+}
+
+// GetFullURL returns the complete API URL
+func (c *Channel) GetFullURL() string {
+    return c.BaseURL + c.APIPath
 }
 
 type GlobalConfig struct {
@@ -190,7 +200,7 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
     }
 
     request, err := http.NewRequestWithContext(ctx, "POST",
-        h.thinkingService.BaseURL+"/v1/chat/completions",
+        h.thinkingService.GetFullURL(),
         bytes.NewBuffer(jsonData))
     if err != nil {
         return "", err
@@ -277,7 +287,7 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
 
     // 创建请求
     request, err := http.NewRequestWithContext(ctx, "POST",
-        h.targetChannel.BaseURL+"/v1/chat/completions",
+        h.targetChannel.GetFullURL(),
         bytes.NewBuffer(jsonData))
     if err != nil {
         return err

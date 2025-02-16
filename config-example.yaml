@@ -3,7 +3,8 @@ thinking_services:
   # 主要思考服务 - DeepSeek
   - id: 1
     name: "deepseek-thinking"
-    base_url: "https://api.deepseek.com"
+    base_url: "https://api-inference.modelscope.cn"
+    api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
     timeout: 10  # 秒
     retry: 3
@@ -13,6 +14,7 @@ thinking_services:
   - id: 2
     name: "openai-thinking"
     base_url: "https://api.openai.com"
+    api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
     timeout: 15
     retry: 2
@@ -23,43 +25,30 @@ channels:
   # DeepSeek 通道
   "1":
     name: "deepseek-channel"
-    base_url: "https://api.deepseek.com"
-    key_prefix: "sk-deep"
+    base_url: "https://api-inference.modelscope.cn"
+    api_path: "/v1/chat/completions"
     timeout: 30
-    models:
-      - "deepseek-chat"
-      - "deepseek-code"
   
   # OpenAI 通道
   "2":
     name: "openai-channel"
     base_url: "https://api.openai.com"
-    key_prefix: "sk-op"
+    api_path: "/v1/chat/completions"
     timeout: 30
-    models:
-      - "gpt-3.5-turbo"
-      - "gpt-4"
   
   # Anthropic 通道
   "3":
     name: "anthropic-channel"
     base_url: "https://api.anthropic.com"
-    key_prefix: "sk-ant"
+    api_path: "/v1/messages"
     timeout: 30
-    models:
-      - "claude-3-opus"
-      - "claude-3-sonnet"
   
   # Moonshot 通道
   "4":
     name: "moonshot-channel"
     base_url: "https://api.moonshot.cn"
-    key_prefix: "sk-moon"
+    api_path: "/v1/chat/completions"
     timeout: 30
-    models:
-      - "moonshot-v1-8k"
-      - "moonshot-v1-32k"
-      - "moonshot-v1-128k"
 
 # 全局配置
 global:
@@ -85,7 +74,7 @@ global:
 
   # 服务配置
   server:
-    port: 8080
+    port: 8888
     host: "0.0.0.0"
     read_timeout: 30
     write_timeout: 30
