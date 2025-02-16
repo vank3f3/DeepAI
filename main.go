@@ -34,7 +34,7 @@ type Config struct {
 type ThinkingService struct {
     ID        int     `mapstructure:"id"`
     Name      string  `mapstructure:"name"`
-    Model     string  `mapstructure:"model"`  // 新增模型字段
+    Model     string  `mapstructure:"model"`
     BaseURL   string  `mapstructure:"base_url"`
     APIPath   string  `mapstructure:"api_path"`
     APIKey    string  `mapstructure:"api_key"`
@@ -243,16 +243,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     req.APIKey = apiKey
 
     // 根据模型确定目标通道
-    targetChannel, ok := s.config.Channels[getChannelIDFromModel(req.Model)]
+    channelID := getChannelIDFromModel(req.Model)
+    targetChannel, ok := s.config.Channels[channelID]
     if !ok {
         http.Error(w, "Unsupported model", http.StatusBadRequest)
         return
     }
 
+    log.Printf("Processing request for model: %s using channel: %s", req.Model, targetChannel.Name)
+
     // 检查是否是思考型请求
     if isThinkingModel(req.Model) {
         // 获取权重最高的思考服务
         thinkingService := s.getHighestWeightThinkingService()
+        log.Printf("Using thinking service: %s", thinkingService.Name)
         
         if req.Stream {
             // 处理流式请求
@@ -298,6 +302,7 @@ func (s *Server) handleNonStreamRequest(w http.ResponseWriter, ctx context.Conte
     // 获取思考链内容
     thinkingResp, err := s.getThinkingContent(ctx, req, thinkingService)
     if err != nil {
+        log.Printf("Error getting thinking content: %v", err)
         http.Error(w, fmt.Sprintf("Thinking service error: %v", err), http.StatusInternalServerError)
         return
     }
@@ -305,6 +310,9 @@ func (s *Server) handleNonStreamRequest(w http.ResponseWriter, ctx context.Conte
     // 将思考链内容添加到请求中
     if len(thinkingResp.Choices) > 0 {
         thinkingContent := thinkingResp.Choices[0].Message.Content
+        log.Printf("Received thinking content length: %d characters", len(thinkingContent))
+        
+        // 在原始消息前添加系统消息，包含思考过程
         req.Messages = append([]ChatCompletionMessage{{
             Role:    "system",
             Content: fmt.Sprintf("Previous thinking process:\n%s\nPlease consider the above thinking process in your response.", 
@@ -349,6 +357,8 @@ func (s *Server) getThinkingContent(ctx context.Context, req *ChatCompletionRequ
     request.Header.Set("Content-Type", "application/json")
     request.Header.Set("Authorization", "Bearer "+thinkingService.APIKey)
 
+    log.Printf("Sending thinking request to: %s", thinkingService.GetFullURL())
+    
     // 执行请求
     resp, err := client.Do(request)
     if err != nil {
@@ -356,10 +366,16 @@ func (s *Server) getThinkingContent(ctx context.Context, req *ChatCompletionRequ
     }
     defer resp.Body.Close()
 
+    // 检查响应状态码
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        return nil, fmt.Errorf("thinking service returned status %d: %s", resp.StatusCode, string(body))
+    }
+
     // 解析响应
     var thinkingResp ChatCompletionResponse
     if err := json.NewDecoder(resp.Body).Decode(&thinkingResp); err != nil {
-        return nil, err
+        return nil, fmt.Errorf("failed to decode thinking response: %v", err)
     }
 
     return &thinkingResp, nil
@@ -529,12 +545,19 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
     request.Header.Set("Content-Type", "application/json")
     request.Header.Set("Authorization", "Bearer "+h.thinkingService.APIKey)
 
+    log.Printf("Starting thinking stream from: %s", h.thinkingService.GetFullURL())
+
     // 执行请求
     resp, err := client.Do(request)
     if err != nil {
         return "", err
     }
     defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        return "", fmt.Errorf("thinking service returned status %d: %s", resp.StatusCode, string(body))
+    }
 
     // 处理流式响应
     reader := bufio.NewReader(resp.Body)
@@ -565,6 +588,7 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
             // 解析流式响应
             var streamResp ChatStreamResponse
             if err := json.Unmarshal(data, &streamResp); err != nil {
+                log.Printf("Error parsing stream response: %v", err)
                 continue
             }
 
@@ -622,12 +646,19 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
     request.Header.Set("Content-Type", "application/json")
     request.Header.Set("Authorization", "Bearer "+req.APIKey)
 
+    log.Printf("Starting final response stream from: %s", h.targetChannel.GetFullURL())
+
     // 执行请求
     resp, err := client.Do(request)
     if err != nil {
         return err
     }
     defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("target service returned status %d: %s", resp.StatusCode, string(body))
+    }
 
     // 直接转发流式响应
     reader := bufio.NewReader(resp.Body)
@@ -771,10 +802,64 @@ func loadConfig() (*Config, error) {
         return nil, fmt.Errorf("failed to unmarshal config: %v", err)
     }
 
+    // 配置校验
+    if err := validateConfig(&config); err != nil {
+        return nil, fmt.Errorf("invalid configuration: %v", err)
+    }
+
     return &config, nil
 }
 
+// validateConfig 验证配置是否有效
+func validateConfig(config *Config) error {
+    // 检查是否有思考服务配置
+    if len(config.ThinkingServices) == 0 {
+        return fmt.Errorf("no thinking services configured")
+    }
+
+    // 检查是否有通道配置
+    if len(config.Channels) == 0 {
+        return fmt.Errorf("no channels configured")
+    }
+
+    // 验证每个思考服务的配置
+    for _, service := range config.ThinkingServices {
+        if service.BaseURL == "" {
+            return fmt.Errorf("thinking service %s has no base URL", service.Name)
+        }
+        if service.APIKey == "" {
+            return fmt.Errorf("thinking service %s has no API key", service.Name)
+        }
+        if service.Timeout <= 0 {
+            return fmt.Errorf("thinking service %s has invalid timeout", service.Name)
+        }
+    }
+
+    // 验证每个通道的配置
+    for id, channel := range config.Channels {
+        if channel.BaseURL == "" {
+            return fmt.Errorf("channel %s has no base URL", id)
+        }
+        if channel.Timeout <= 0 {
+            return fmt.Errorf("channel %s has invalid timeout", id)
+        }
+    }
+
+    // 验证全局配置
+    if config.Global.DefaultTimeout <= 0 {
+        return fmt.Errorf("invalid global default timeout")
+    }
+    if config.Global.Server.Port <= 0 {
+        return fmt.Errorf("invalid server port")
+    }
+
+    return nil
+}
+
 func main() {
+    // 设置日志格式
+    log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+
     // 加载配置
     config, err := loadConfig()
     if err != nil {
