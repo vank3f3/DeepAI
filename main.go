@@ -844,7 +844,16 @@ func validateConfig(config *Config) error {
 
     for _, service := range config.ThinkingServices {
         if service.BaseURL == "" {
+            return fmt.Errorf("thinking service %s has no base URL", service.Name)
+        }
+        if service.APIKey == "" {
+            return fmt.Errorf("thinking service %s has no API key", service.Name)
+        }
+        if service.Timeout <= 0 {
             return fmt.Errorf("thinking service %s has invalid timeout", service.Name)
+        }
+        if service.Model == "" {
+            return fmt.Errorf("thinking service %s has no model specified", service.Name)
         }
     }
 
