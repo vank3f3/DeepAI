@@ -110,6 +110,7 @@ type ChatCompletionRequest struct {
 type ChatCompletionMessage struct {
     Role    string `json:"role"`
     Content string `json:"content"`
+    ReasoningContent interface{} `json:"reasoning_content,omitempty"`
 }
 
 type ChatCompletionResponse struct {
@@ -321,9 +322,16 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
     thinkingReq.Model = thinkingService.Model
     thinkingReq.APIKey = thinkingService.APIKey
     
+    // 为思考链处理添加特殊提示
+    thinkingPrompt := ChatCompletionMessage{
+        Role:    "system",
+        Content: "Please provide a detailed reasoning process for your response. Think step by step.",
+    }
+    thinkingReq.Messages = append([]ChatCompletionMessage{thinkingPrompt}, thinkingReq.Messages...)
+    
     jsonData, err := json.Marshal(thinkingReq)
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("failed to marshal thinking request: %v", err)
     }
 
     client, err := createHTTPClient(thinkingService.Proxy, time.Duration(thinkingService.Timeout)*time.Second)
@@ -335,7 +343,7 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
         thinkingService.GetFullURL(),
         bytes.NewBuffer(jsonData))
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("failed to create request: %v", err)
     }
 
     request.Header.Set("Content-Type", "application/json")
@@ -345,7 +353,7 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
     
     resp, err := client.Do(request)
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("failed to send thinking request: %v", err)
     }
     defer resp.Body.Close()
 
@@ -359,14 +367,40 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
         return nil, fmt.Errorf("failed to decode thinking response: %v", err)
     }
 
+    if len(thinkingResp.Choices) == 0 {
+        return nil, fmt.Errorf("thinking service returned no choices")
+    }
+
     result := &ThinkingResponse{
         Content: thinkingResp.Choices[0].Message.Content,
     }
 
-    // 尝试提取 reasoning_content
-    if reasoningContent, ok := thinkingResp.Choices[0].Message.ReasoningContent.(string); ok {
-        result.ReasoningContent = reasoningContent
+    // 提取 reasoning_content
+    if thinkingResp.Choices[0].Message.ReasoningContent != nil {
+        switch v := thinkingResp.Choices[0].Message.ReasoningContent.(type) {
+        case string:
+            result.ReasoningContent = v
+        case map[string]interface{}:
+            if jsonBytes, err := json.Marshal(v); err == nil {
+                result.ReasoningContent = string(jsonBytes)
+            } else {
+                log.Printf("Warning: Failed to marshal reasoning content: %v", err)
+            }
+        default:
+            log.Printf("Warning: Unexpected reasoning_content type: %T", v)
+        }
     }
+
+    // 如果没有获取到 reasoning_content，使用 content 作为备选
+    if result.ReasoningContent == "" {
+        result.ReasoningContent = result.Content
+        result.Content = "Based on the above reasoning."
+    }
+
+    // 记录处理结果
+    log.Printf("Processed thinking content:")
+    log.Printf("- Content length: %d", len(result.Content))
+    log.Printf("- Reasoning content length: %d", len(result.ReasoningContent))
 
     return result, nil
 }
