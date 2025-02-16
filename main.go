@@ -240,8 +240,8 @@ func NewServer(config *Config) *Server {
 
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
-	mux.HandleFunc("/v1/models", s.handleModels) // 添加 /v1/models 路由
+	mux.HandleFunc("/v1/chat/completions", s.handleOpenAIRequests)
+	mux.HandleFunc("/v1/models", s.handleOpenAIRequests) // 使用同一个 handler 处理 /v1/models
 	mux.HandleFunc("/health", s.handleHealth)
 
 	s.srv = &http.Server{
@@ -265,15 +265,43 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 }
 
-func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.URL.Path == "/v1/chat/completions" { // /v1/models 可以是 GET
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.Method != http.MethodGet && r.URL.Path == "/v1/models" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	logger := NewRequestLogger(s.config)
 
-	// 读取请求体
+	fullAPIKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	apiKey := extractRealAPIKey(fullAPIKey)
+	channelID := extractChannelID(fullAPIKey)
+
+	logger.Log("Received request for %s with API Key: %s", r.URL.Path, logAPIKey(fullAPIKey))
+	logger.Log("Extracted channel ID: %s", channelID)
+	logger.Log("Extracted real API Key: %s", logAPIKey(apiKey))
+
+	targetChannel, ok := s.config.Channels[channelID]
+	if !ok {
+		http.Error(w, "Invalid channel", http.StatusBadRequest)
+		return
+	}
+
+	if r.URL.Path == "/v1/models" {
+		// 处理 /v1/models 请求
+		req := &ChatCompletionRequest{ //  虽然是 ChatCompletionRequest 结构体，但这里只用它来传递 APIKey 等信息
+			APIKey: apiKey,
+		}
+		logger.Log("Forwarding /v1/models request to channel: %s", targetChannel.Name)
+		s.forwardModelsRequest(w, r.Context(), req, targetChannel)
+		return
+	}
+
+	// 读取请求体 (for /v1/chat/completions)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		logger.Log("Error reading request body: %v", err)
@@ -292,20 +320,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	fullAPIKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	apiKey := extractRealAPIKey(fullAPIKey)
-	channelID := extractChannelID(fullAPIKey)
-
-	logger.Log("Received request with API Key: %s", logAPIKey(fullAPIKey))
-	logger.Log("Extracted channel ID: %s", channelID)
-	logger.Log("Extracted real API Key: %s", logAPIKey(apiKey))
-
-	targetChannel, ok := s.config.Channels[channelID]
-	if !ok {
-		http.Error(w, "Invalid channel", http.StatusBadRequest)
-		return
-	}
+	req.APIKey = apiKey // 设置 APIKey
 
 	thinkingService := s.getHighestWeightThinkingService()
 	logger.Log("Using thinking service: %s with API Key: %s",
@@ -318,7 +333,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		req.APIKey = apiKey
 		if err := handler.HandleRequest(r.Context(), &req); err != nil {
 			logger.Log("Stream handler error: %v", err)
 			return
@@ -331,7 +345,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		req.APIKey = apiKey
 		enhancedReq := s.prepareEnhancedRequest(&req, thinkingResp)
 
 		logger.Log("Forwarding enhanced request to channel with API Key: %s", logAPIKey(apiKey))
@@ -339,36 +352,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	logger := NewRequestLogger(s.config)
-
-	fullAPIKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	apiKey := extractRealAPIKey(fullAPIKey)
-	channelID := extractChannelID(fullAPIKey)
-
-	logger.Log("Received /v1/models request with API Key: %s", logAPIKey(fullAPIKey))
-	logger.Log("Extracted channel ID: %s", channelID)
-	logger.Log("Extracted real API Key: %s", logAPIKey(apiKey))
-
-	targetChannel, ok := s.config.Channels[channelID]
-	if !ok {
-		http.Error(w, "Invalid channel", http.StatusBadRequest)
-		return
-	}
-
-	// 构建转发请求 (GET 请求不需要 body)
-	req := &ChatCompletionRequest{ //  虽然是 ChatCompletionRequest 结构体，但这里只用它来传递 APIKey 等信息
-		APIKey: apiKey,
-	}
-
-	logger.Log("Forwarding /v1/models request to channel: %s", targetChannel.Name)
-	s.forwardModelsRequest(w, r.Context(), req, targetChannel)
-}
 
 func (s *Server) getHighestWeightThinkingService() ThinkingService {
 	var highest ThinkingService
@@ -616,7 +599,23 @@ func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context
 
 	log.Printf("Forwarding /v1/models request details:")
 	log.Printf("- Channel: %s", targetChannel.Name)
-	log.Printf("- URL: %s", targetChannel.GetFullURL()+"/models") // 注意这里拼接了 /models
+
+	// 1. 构建完整的 chat completions URL
+	fullChatURL := targetChannel.GetFullURL()
+	log.Printf("- Full Chat URL: %s", fullChatURL)
+
+	// 2. 解析完整的 chat completions URL
+	parsedChatURL, err := url.Parse(fullChatURL)
+	if err != nil {
+		log.Printf("Error parsing chat URL: %v", err)
+		http.Error(w, "Failed to parse chat URL", http.StatusInternalServerError)
+		return
+	}
+
+	// 3. 构建 models URL：使用解析后的 URL 的 Base 部分，然后拼接 "/v1/models"
+	baseURL := parsedChatURL.Scheme + "://" + parsedChatURL.Host
+	modelsURL := strings.TrimSuffix(baseURL, "/") + "/v1/models" // 确保 baseURL 末尾没有斜杠再拼接
+	log.Printf("- Models URL: %s", modelsURL)
 	log.Printf("- Input API Key: %s", logAPIKey(req.APIKey))
 
 	client, err := createHTTPClient(targetChannel.Proxy, time.Duration(targetChannel.Timeout)*time.Second)
@@ -626,10 +625,10 @@ func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context
 		return
 	}
 
-	// 创建 GET 请求
+	// 4. 创建 GET 请求，使用构建的 modelsURL
 	request, err := http.NewRequestWithContext(ctx, "GET",
-		targetChannel.GetFullURL()+"/models", // 注意这里拼接了 /models
-		nil) // GET 请求 body 为 nil
+		modelsURL,
+		nil)
 	if err != nil {
 		log.Printf("Error creating /v1/models request: %v", err)
 		http.Error(w, "Failed to create request", http.StatusInternalServerError)
