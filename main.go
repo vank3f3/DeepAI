@@ -241,6 +241,7 @@ func NewServer(config *Config) *Server {
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
+	mux.HandleFunc("/v1/models", s.handleModels) // 添加 /v1/models 路由
 	mux.HandleFunc("/health", s.handleHealth)
 
 	s.srv = &http.Server{
@@ -336,6 +337,37 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		logger.Log("Forwarding enhanced request to channel with API Key: %s", logAPIKey(apiKey))
 		s.forwardRequest(w, r.Context(), enhancedReq, targetChannel)
 	}
+}
+
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	logger := NewRequestLogger(s.config)
+
+	fullAPIKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	apiKey := extractRealAPIKey(fullAPIKey)
+	channelID := extractChannelID(fullAPIKey)
+
+	logger.Log("Received /v1/models request with API Key: %s", logAPIKey(fullAPIKey))
+	logger.Log("Extracted channel ID: %s", channelID)
+	logger.Log("Extracted real API Key: %s", logAPIKey(apiKey))
+
+	targetChannel, ok := s.config.Channels[channelID]
+	if !ok {
+		http.Error(w, "Invalid channel", http.StatusBadRequest)
+		return
+	}
+
+	// 构建转发请求 (GET 请求不需要 body)
+	req := &ChatCompletionRequest{ //  虽然是 ChatCompletionRequest 结构体，但这里只用它来传递 APIKey 等信息
+		APIKey: apiKey,
+	}
+
+	logger.Log("Forwarding /v1/models request to channel: %s", targetChannel.Name)
+	s.forwardModelsRequest(w, r.Context(), req, targetChannel)
 }
 
 func (s *Server) getHighestWeightThinkingService() ThinkingService {
@@ -578,6 +610,74 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
 }
+
+func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context, req *ChatCompletionRequest, targetChannel Channel) {
+	logger := NewRequestLogger(s.config)
+
+	log.Printf("Forwarding /v1/models request details:")
+	log.Printf("- Channel: %s", targetChannel.Name)
+	log.Printf("- URL: %s", targetChannel.GetFullURL()+"/models") // 注意这里拼接了 /models
+	log.Printf("- Input API Key: %s", logAPIKey(req.APIKey))
+
+	client, err := createHTTPClient(targetChannel.Proxy, time.Duration(targetChannel.Timeout)*time.Second)
+	if err != nil {
+		log.Printf("Error creating HTTP client: %v, Proxy: %s", err, targetChannel.Proxy)
+		http.Error(w, fmt.Sprintf("Failed to create HTTP client: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// 创建 GET 请求
+	request, err := http.NewRequestWithContext(ctx, "GET",
+		targetChannel.GetFullURL()+"/models", // 注意这里拼接了 /models
+		nil) // GET 请求 body 为 nil
+	if err != nil {
+		log.Printf("Error creating /v1/models request: %v", err)
+		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+		return
+	}
+
+	request.Header.Set("Authorization", "Bearer "+req.APIKey)
+
+	log.Printf("Request headers for /v1/models: %v", maskSensitiveHeaders(request.Header))
+
+	resp, err := client.Do(request)
+	if err != nil {
+		log.Printf("Error forwarding /v1/models request: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to forward request: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 读取响应体
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Error reading /v1/models response body: %v", err)
+		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+		return
+	}
+
+	// 打印响应内容 (可选)
+	if s.config.Global.Log.Debug.PrintResponse {
+		logger.LogContent("/v1/models Response", string(respBody), s.config.Global.Log.Debug.MaxContentLength)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("Error response from target for /v1/models: Status: %d, Body: %s", resp.StatusCode, string(respBody))
+		http.Error(w, fmt.Sprintf("Target server error: %s", resp.Status), resp.StatusCode)
+		return
+	}
+
+	// 复制响应头
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	w.Write(respBody)
+}
+
 
 // ThinkingStreamCollector 用于收集和处理思考链的流式输出
 type ThinkingStreamCollector struct {
