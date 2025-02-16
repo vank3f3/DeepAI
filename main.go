@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -322,7 +323,7 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 	}
 	req.APIKey = apiKey // 设置 APIKey
 
-	thinkingService := s.getHighestWeightThinkingService()
+	thinkingService := s.getWeightedRandomThinkingService() // 使用加权随机选择
 	logger.Log("Using thinking service: %s with API Key: %s",
 		thinkingService.Name, logAPIKey(thinkingService.APIKey))
 
@@ -352,20 +353,39 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) getWeightedRandomThinkingService() ThinkingService {
+	thinkingServices := s.config.ThinkingServices
+	if len(thinkingServices) == 0 {
+		return ThinkingService{} // 或者返回错误，根据你的错误处理策略
+	}
 
-func (s *Server) getHighestWeightThinkingService() ThinkingService {
-	var highest ThinkingService
-	maxWeight := -1
+	totalWeight := 0
+	for _, service := range thinkingServices {
+		totalWeight += service.Weight
+	}
 
-	for _, service := range s.config.ThinkingServices {
-		if service.Weight > maxWeight {
-			maxWeight = service.Weight
-			highest = service
+	if totalWeight <= 0 {
+		// 如果总权重为 0 或负数，则退回到轮询或其他默认策略，或者返回第一个服务
+		log.Println("Warning: Total weight of thinking services is not positive, using first service as default.")
+		return thinkingServices[0] // 返回第一个服务作为默认
+	}
+
+	// 生成一个 0 到 totalWeight-1 的随机数
+	randNum := rand.Intn(totalWeight)
+
+	currentWeightSum := 0
+	for _, service := range thinkingServices {
+		currentWeightSum += service.Weight
+		if randNum < currentWeightSum {
+			return service
 		}
 	}
 
-	return highest
+	// 理论上不应该到达这里，除非总权重计算或随机数生成有问题，为了安全，返回第一个服务
+	log.Println("Warning: Fallback to first thinking service due to unexpected condition in weighted random selection.")
+	return thinkingServices[0]
 }
+
 
 type ThinkingResponse struct {
 	Content          string
@@ -1178,6 +1198,9 @@ func validateConfig(config *Config) error {
 func main() {
 	// 设置日志格式 - 包含日期、时间（精确到微秒）、文件名和行号
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+
+	// 初始化随机数种子 - 只需在程序启动时执行一次
+	rand.Seed(time.Now().UnixNano())
 
 	// 加载配置文件
 	config, err := loadConfig()

@@ -6,8 +6,8 @@ thinking_services:
     base_url: "https://api-inference.modelscope.cn"
     api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
-    timeout: 300  # 秒
-    retry: 3
+    timeout: 600  # 秒
+    retry: 2
     weight: 100  # 权重越高优先级越高
     proxy: ""    # 可选代理设置，留空则不使用代理
   
@@ -17,7 +17,7 @@ thinking_services:
     base_url: "https://api.openai.com"
     api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
-    timeout: 300
+    timeout: 600
     retry: 2
     weight: 50
     proxy: "http://127.0.0.1:7890"  # HTTP代理示例
@@ -29,7 +29,7 @@ channels:
     name: "modelscope-channel"
     base_url: "https://api-inference.modelscope.cn"
     api_path: "/v1/chat/completions"
-    timeout: 300
+    timeout: 600
     proxy: ""  # 不使用代理
   
   # OpenAI 通道
@@ -37,7 +37,7 @@ channels:
     name: "openai-channel"
     base_url: "https://api.openai.com"
     api_path: "/v1/chat/completions"
-    timeout: 300
+    timeout: 600
     proxy: "socks5://127.0.0.1:7890"  # SOCKS5代理示例
   
 
@@ -63,7 +63,7 @@ global:
   
   # 重试配置
   max_retries: 3
-  default_timeout: 30
+  default_timeout: 300
   
   # 需要重试的错误码
   error_codes:
@@ -90,6 +90,6 @@ global:
   server:
     port: 8888
     host: "0.0.0.0"
-    read_timeout: 300
-    write_timeout: 300
-    idle_timeout: 300
+    read_timeout: 600
+    write_timeout: 600
+    idle_timeout: 600
