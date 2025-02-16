@@ -1,0 +1,92 @@
+# 思考链服务配置
+thinking_services:
+  # 主要思考服务 - DeepSeek
+  - id: 1
+    name: "deepseek-thinking"
+    base_url: "https://api.deepseek.com"
+    api_key: "sk-xxxxxxxxxxxxxxxx"
+    timeout: 10  # 秒
+    retry: 3
+    weight: 100  # 权重越高优先级越高
+  
+  # 备用思考服务 - OpenAI
+  - id: 2
+    name: "openai-thinking"
+    base_url: "https://api.openai.com"
+    api_key: "sk-xxxxxxxxxxxxxxxx"
+    timeout: 15
+    retry: 2
+    weight: 50
+
+# API通道配置
+channels:
+  # DeepSeek 通道
+  "1":
+    name: "deepseek-channel"
+    base_url: "https://api.deepseek.com"
+    key_prefix: "sk-deep"
+    timeout: 30
+    models:
+      - "deepseek-chat"
+      - "deepseek-code"
+  
+  # OpenAI 通道
+  "2":
+    name: "openai-channel"
+    base_url: "https://api.openai.com"
+    key_prefix: "sk-op"
+    timeout: 30
+    models:
+      - "gpt-3.5-turbo"
+      - "gpt-4"
+  
+  # Anthropic 通道
+  "3":
+    name: "anthropic-channel"
+    base_url: "https://api.anthropic.com"
+    key_prefix: "sk-ant"
+    timeout: 30
+    models:
+      - "claude-3-opus"
+      - "claude-3-sonnet"
+  
+  # Moonshot 通道
+  "4":
+    name: "moonshot-channel"
+    base_url: "https://api.moonshot.cn"
+    key_prefix: "sk-moon"
+    timeout: 30
+    models:
+      - "moonshot-v1-8k"
+      - "moonshot-v1-32k"
+      - "moonshot-v1-128k"
+
+# 全局配置
+global:
+  # 重试配置
+  max_retries: 3
+  default_timeout: 30
+  
+  # 需要重试的错误码
+  error_codes:
+    retry_on:
+      - 429  # Rate limit
+      - 500  # Internal server error
+      - 502  # Bad gateway
+      - 503  # Service unavailable
+      - 504  # Gateway timeout
+  
+  # 日志配置
+  log:
+    level: "info"      # debug, info, warn, error
+    format: "json"     # text, json
+    output: "file"     # console, file
+    file_path: "./logs/deepai.log"
+
+  # 服务配置
+  server:
+    port: 8080
+    host: "0.0.0.0"
+    read_timeout: 30
+    write_timeout: 30
+    idle_timeout: 60
