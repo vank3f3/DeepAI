@@ -34,6 +34,7 @@ type Config struct {
 type ThinkingService struct {
     ID        int     `mapstructure:"id"`
     Name      string  `mapstructure:"name"`
+    Model     string  `mapstructure:"model"`  // 新增模型字段
     BaseURL   string  `mapstructure:"base_url"`
     APIPath   string  `mapstructure:"api_path"`
     APIKey    string  `mapstructure:"api_key"`
@@ -319,8 +320,13 @@ func (s *Server) handleNonStreamRequest(w http.ResponseWriter, ctx context.Conte
 func (s *Server) getThinkingContent(ctx context.Context, req *ChatCompletionRequest, 
     thinkingService ThinkingService) (*ChatCompletionResponse, error) {
     
+    // 准备思考服务请求的副本
+    thinkingReq := *req
+    // 使用思考服务指定的模型
+    thinkingReq.Model = thinkingService.Model
+    
     // 准备请求
-    jsonData, err := json.Marshal(req)
+    jsonData, err := json.Marshal(thinkingReq)
     if err != nil {
         return nil, err
     }
@@ -467,6 +473,7 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
     // 准备思考链请求
     thinkingReq := *req // 复制请求
     thinkingReq.Stream = true
+    thinkingReq.Model = h.thinkingService.Model  // 使用思考服务指定的模型
 
     // 准备请求
     jsonData, err := json.Marshal(thinkingReq)
