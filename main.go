@@ -7,12 +7,82 @@ import (
     "encoding/json"
     "fmt"
     "io"
+    "log"
     "net/http"
     "strings"
     "sync"
 )
 
-// ChatStreamResponse 表示流式响应的结构
+// 配置结构
+type Config struct {
+    ThinkingServices []ThinkingService     `mapstructure:"thinking_services"`
+    Channels        map[string]Channel    `mapstructure:"channels"`
+    Global          GlobalConfig          `mapstructure:"global"`
+}
+
+type ThinkingService struct {
+    ID        int     `mapstructure:"id"`
+    Name      string  `mapstructure:"name"`
+    BaseURL   string  `mapstructure:"base_url"`
+    APIKey    string  `mapstructure:"api_key"`
+    Timeout   int     `mapstructure:"timeout"`
+    Retry     int     `mapstructure:"retry"`
+    Weight    int     `mapstructure:"weight"`
+}
+
+type Channel struct {
+    Name      string   `mapstructure:"name"`
+    BaseURL   string   `mapstructure:"base_url"`
+    KeyPrefix string   `mapstructure:"key_prefix"`
+    Timeout   int      `mapstructure:"timeout"`
+    Models    []string `mapstructure:"models"`
+}
+
+type GlobalConfig struct {
+    MaxRetries     int    `mapstructure:"max_retries"`
+    DefaultTimeout int    `mapstructure:"default_timeout"`
+    ErrorCodes     struct {
+        RetryOn []int `mapstructure:"retry_on"`
+    } `mapstructure:"error_codes"`
+}
+
+// API相关结构
+type ChatCompletionRequest struct {
+    Model       string                  `json:"model"`
+    Messages    []ChatCompletionMessage `json:"messages"`
+    Temperature float64                 `json:"temperature,omitempty"`
+    MaxTokens   int                    `json:"max_tokens,omitempty"`
+    Stream      bool                    `json:"stream,omitempty"`
+    APIKey      string                 `json:"-"` // 用于内部传递，不序列化
+}
+
+type ChatCompletionMessage struct {
+    Role    string `json:"role"`
+    Content string `json:"content"`
+}
+
+type ChatCompletionResponse struct {
+    ID      string   `json:"id"`
+    Object  string   `json:"object"`
+    Created int64    `json:"created"`
+    Model   string   `json:"model"`
+    Choices []Choice `json:"choices"`
+    Usage   Usage    `json:"usage"`
+}
+
+type Choice struct {
+    Index        int                   `json:"index"`
+    Message      ChatCompletionMessage `json:"message"`
+    FinishReason string               `json:"finish_reason"`
+}
+
+type Usage struct {
+    PromptTokens     int `json:"prompt_tokens"`
+    CompletionTokens int `json:"completion_tokens"`
+    TotalTokens      int `json:"total_tokens"`
+}
+
+// 流式响应结构
 type ChatStreamResponse struct {
     ID      string `json:"id"`
     Object  string `json:"object"`
@@ -215,7 +285,7 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
 
     // 设置请求头
     request.Header.Set("Content-Type", "application/json")
-    request.Header.Set("Authorization", "Bearer "+req.APIKey) // 使用原始请求的API key
+    request.Header.Set("Authorization", "Bearer "+req.APIKey)
 
     // 执行请求
     client := &http.Client{}
@@ -242,4 +312,9 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
     }
 
     return nil
+}
+
+func main() {
+    // TODO: Add main server implementation
+    log.Println("Starting DeepAI server...")
 }
