@@ -60,6 +60,10 @@ channels:
 
 # 全局配置
 global:
+  thinking:
+    enabled: true  # 全局启用思考链
+    add_to_all_requests: true  # 为所有请求添加思考链
+    timeout: 30  # 思考链处理超时时间
   # 配置文件搜索路径
   config_paths:
     - "./config.yaml"           # 当前目录
