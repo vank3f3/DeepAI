@@ -1,6 +1,4 @@
-好的,我来帮您完善一下 README.md 文件:
 
-```markdown
 # DeepAI
 
 DeepAI 是一个支持 OpenAI API 兼容思考链 (Thinking Chain) 的代理服务器。它可以对接多个后端思考链/LLM 服务,同时提供一个标准的 OpenAI 兼容 API。
