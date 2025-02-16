@@ -361,41 +361,57 @@ type ThinkingResponse struct {
 func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletionRequest, 
     thinkingService ThinkingService) (*ThinkingResponse, error) {
     
-    logger := NewRequestLogger(s.config)
+        logger := NewRequestLogger(s.config)
+        
+        log.Printf("Getting thinking content from service: %s", thinkingService.Name)
+        log.Printf("Using thinking service API Key: %s", logAPIKey(thinkingService.APIKey))
     
-    log.Printf("Getting thinking content from service: %s", thinkingService.Name)
-    log.Printf("Using thinking service API Key: %s", logAPIKey(thinkingService.APIKey))
-
-    thinkingReq := *req
-    thinkingReq.Model = thinkingService.Model
-    thinkingReq.APIKey = thinkingService.APIKey
+        thinkingReq := *req
+        thinkingReq.Model = thinkingService.Model
+        thinkingReq.APIKey = thinkingService.APIKey
+        
+        thinkingPrompt := ChatCompletionMessage{
+            Role:    "system",
+            Content: "Please provide a detailed reasoning process for your response. Think step by step.",
+        }
+        thinkingReq.Messages = append([]ChatCompletionMessage{thinkingPrompt}, thinkingReq.Messages...)
+        
+        // 记录思考服务请求
+        if s.config.Global.Log.Debug.PrintRequest {
+            logger.LogContent("Thinking Service Request", thinkingReq, s.config.Global.Log.Debug.MaxContentLength)
+        }
+        
+        // 修复：使用jsonData变量
+        jsonData, err := json.Marshal(thinkingReq)
+        if err != nil {
+            return nil, fmt.Errorf("failed to marshal thinking request: %v", err)
+        }
     
-    thinkingPrompt := ChatCompletionMessage{
-        Role:    "system",
-        Content: "Please provide a detailed reasoning process for your response. Think step by step.",
-    }
-    thinkingReq.Messages = append([]ChatCompletionMessage{thinkingPrompt}, thinkingReq.Messages...)
+        // 修复：创建HTTP客户端
+        client, err := createHTTPClient(thinkingService.Proxy, 
+            time.Duration(thinkingService.Timeout)*time.Second)
+        if err != nil {
+            return nil, fmt.Errorf("failed to create HTTP client: %v", err)
+        }
     
-    // 记录思考服务请求
-    if s.config.Global.Log.Debug.PrintRequest {
-        logger.LogContent("Thinking Service Request", thinkingReq, s.config.Global.Log.Debug.MaxContentLength)
-    }
+        // 修复：创建请求
+        request, err := http.NewRequestWithContext(ctx, "POST",
+            thinkingService.GetFullURL(),
+            bytes.NewBuffer(jsonData))
+        if err != nil {
+            return nil, fmt.Errorf("failed to create request: %v", err)
+        }
     
-    jsonData, err := json.Marshal(thinkingReq)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create request: %v", err)
-    }
-
-    request.Header.Set("Content-Type", "application/json")
-    request.Header.Set("Authorization", "Bearer "+thinkingService.APIKey)
-
-    log.Printf("Sending thinking request to: %s", thinkingService.GetFullURL())
+        request.Header.Set("Content-Type", "application/json")
+        request.Header.Set("Authorization", "Bearer "+thinkingService.APIKey)
     
-    resp, err := client.Do(request)
-    if err != nil {
-        return nil, fmt.Errorf("failed to send thinking request: %v", err)
-    }
-    defer resp.Body.Close()
+        log.Printf("Sending thinking request to: %s", thinkingService.GetFullURL())
+        
+        resp, err := client.Do(request)
+        if err != nil {
+            return nil, fmt.Errorf("failed to send thinking request: %v", err)
+        }
+        defer resp.Body.Close()
 
     // 读取响应体
     respBody, err := io.ReadAll(resp.Body)
