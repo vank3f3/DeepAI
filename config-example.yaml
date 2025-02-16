@@ -3,6 +3,7 @@ thinking_services:
   # 主要思考服务 - DeepSeek
   - id: 1
     name: "deepseek-thinking"
+    model: "deepseek-reasoner"  # 添加模型配置
     base_url: "https://api-inference.modelscope.cn"
     api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
@@ -14,6 +15,7 @@ thinking_services:
   # 备用思考服务 - OpenAI
   - id: 2
     name: "openai-thinking"
+    model: "deepseek-reasoner"  # 添加模型配置
     base_url: "https://api.openai.com"
     api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"

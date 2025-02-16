@@ -369,9 +369,13 @@ func (s *Server) getThinkingContent(ctx context.Context, req *ChatCompletionRequ
 func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req *ChatCompletionRequest, 
     targetChannel Channel) {
     
+    // 记录请求信息
+    log.Printf("Forwarding request to channel: %s, URL: %s", targetChannel.Name, targetChannel.GetFullURL())
+    
     // 准备请求
     jsonData, err := json.Marshal(req)
     if err != nil {
+        log.Printf("Error marshaling request: %v", err)
         http.Error(w, "Failed to marshal request", http.StatusInternalServerError)
         return
     }
@@ -379,6 +383,7 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
     // 创建HTTP客户端
     client, err := createHTTPClient(targetChannel.Proxy, time.Duration(targetChannel.Timeout)*time.Second)
     if err != nil {
+        log.Printf("Error creating HTTP client: %v, Proxy: %s", err, targetChannel.Proxy)
         http.Error(w, fmt.Sprintf("Failed to create HTTP client: %v", err), http.StatusInternalServerError)
         return
     }
@@ -388,6 +393,7 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
         targetChannel.GetFullURL(),
         strings.NewReader(string(jsonData)))
     if err != nil {
+        log.Printf("Error creating request: %v", err)
         http.Error(w, "Failed to create request", http.StatusInternalServerError)
         return
     }
@@ -396,13 +402,25 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
     request.Header.Set("Content-Type", "application/json")
     request.Header.Set("Authorization", "Bearer "+req.APIKey)
     
+    // 记录请求详情（排除敏感信息）
+    log.Printf("Request headers: %v", maskSensitiveHeaders(request.Header))
+    
     // 执行请求
     resp, err := client.Do(request)
     if err != nil {
-        http.Error(w, "Failed to forward request", http.StatusInternalServerError)
+        log.Printf("Error forwarding request: %v", err)
+        http.Error(w, fmt.Sprintf("Failed to forward request: %v", err), http.StatusInternalServerError)
         return
     }
     defer resp.Body.Close()
+
+    // 如果响应状态码不是2xx，记录详细错误信息
+    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+        body, _ := io.ReadAll(resp.Body)
+        log.Printf("Error response from target: Status: %d, Body: %s", resp.StatusCode, string(body))
+        http.Error(w, fmt.Sprintf("Target server error: %s", resp.Status), resp.StatusCode)
+        return
+    }
 
     // 复制响应头
     for key, values := range resp.Header {
@@ -418,6 +436,19 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
     if _, err := io.Copy(w, resp.Body); err != nil {
         log.Printf("Error copying response: %v", err)
     }
+}
+
+// maskSensitiveHeaders 遮蔽敏感的header信息
+func maskSensitiveHeaders(headers http.Header) http.Header {
+    masked := make(http.Header)
+    for k, v := range headers {
+        if k == "Authorization" {
+            masked[k] = []string{"Bearer ****"}
+        } else {
+            masked[k] = v
+        }
+    }
+    return masked
 }
 
 // StreamHandler 处理流式请求
