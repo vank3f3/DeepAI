@@ -1,37 +1,35 @@
 # 思考链服务配置
 thinking_services:
-  # 主要思考服务 - DeepSeek
   - id: 1
-    name: "deepseek-thinking"
-    model: "deepseek-reasoner"  # 添加模型配置
+    name: "modelscope-deepseek-thinking"
+    model: "deepseek-ai/DeepSeek-R1"  # 添加模型配置
     base_url: "https://api-inference.modelscope.cn"
     api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
-    timeout: 10  # 秒
+    timeout: 300  # 秒
     retry: 3
     weight: 100  # 权重越高优先级越高
     proxy: ""    # 可选代理设置，留空则不使用代理
   
-  # 备用思考服务 - OpenAI
   - id: 2
     name: "openai-thinking"
-    model: "deepseek-reasoner"  # 添加模型配置
+    model: "o3-mini"  # 添加模型配置
     base_url: "https://api.openai.com"
     api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
-    timeout: 15
+    timeout: 300
     retry: 2
     weight: 50
     proxy: "http://127.0.0.1:7890"  # HTTP代理示例
 
 # API通道配置
 channels:
-  # DeepSeek 通道
+  # modelscope 通道
   "1":
-    name: "deepseek-channel"
+    name: "modelscope-channel"
     base_url: "https://api-inference.modelscope.cn"
     api_path: "/v1/chat/completions"
-    timeout: 30
+    timeout: 300
     proxy: ""  # 不使用代理
   
   # OpenAI 通道
@@ -39,24 +37,10 @@ channels:
     name: "openai-channel"
     base_url: "https://api.openai.com"
     api_path: "/v1/chat/completions"
-    timeout: 30
+    timeout: 300
     proxy: "socks5://127.0.0.1:7890"  # SOCKS5代理示例
   
-  # Anthropic 通道
-  "3":
-    name: "anthropic-channel"
-    base_url: "https://api.anthropic.com"
-    api_path: "/v1/messages"
-    timeout: 30
-    proxy: "http://proxy.example.com:8080"  # HTTP代理示例
-  
-  # Moonshot 通道
-  "4":
-    name: "moonshot-channel"
-    base_url: "https://api.moonshot.cn"
-    api_path: "/v1/chat/completions"
-    timeout: 30
-    proxy: ""  # 不使用代理
+
 
 # 全局配置
 global:
@@ -73,9 +57,9 @@ global:
 
   # 代理配置
   proxy:
-    enabled: true  # 是否启用全局代理
+    enabled: false  # 是否启用全局代理
     default: ""    # 默认代理，留空则不使用。会被服务特定代理覆盖
-    allow_insecure: false  # 是否允许不安全的HTTPS连接
+    allow_insecure: true  # 是否允许不安全的HTTPS连接
   
   # 重试配置
   max_retries: 3
@@ -106,6 +90,6 @@ global:
   server:
     port: 8888
     host: "0.0.0.0"
-    read_timeout: 30
-    write_timeout: 30
-    idle_timeout: 60
+    read_timeout: 300
+    write_timeout: 300
+    idle_timeout: 300
