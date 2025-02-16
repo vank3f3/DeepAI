@@ -976,3 +976,46 @@ func validateConfig(config *Config) error {
 }
 
 func main() {
+    // 设置日志格式 - 包含日期、时间（精确到微秒）、文件名和行号
+    log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+
+    // 加载配置文件
+    config, err := loadConfig()
+    if err != nil {
+        log.Fatalf("Failed to load config: %v", err)
+    }
+
+    // 输出使用的配置文件路径
+    log.Printf("Using config file: %s", viper.ConfigFileUsed())
+
+    // 创建服务器实例
+    server := NewServer(config)
+
+    // 处理优雅关闭 - 设置中断信号通道
+    done := make(chan os.Signal, 1)
+    signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+
+    // 在后台启动服务器
+    go func() {
+        if err := server.Start(); err != nil && err != http.ErrServerClosed {
+            log.Fatalf("Failed to start server: %v", err)
+        }
+    }()
+
+    log.Printf("Server started successfully")
+
+    // 等待中断信号
+    <-done
+    log.Print("Server stopping...")
+
+    // 创建关闭超时上下文
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    // 优雅关闭服务器
+    if err := server.Shutdown(ctx); err != nil {
+        log.Printf("Server forced to shutdown: %v", err)
+    }
+
+    log.Print("Server stopped")
+}
