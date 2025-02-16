@@ -15,6 +15,7 @@ import (
     "os"
     "os/signal"
     "path/filepath"
+    "regexp"
     "strings"
     "sync"
     "syscall"
@@ -61,6 +62,21 @@ func (c *Channel) GetFullURL() string {
     return c.BaseURL + c.APIPath
 }
 
+type LogConfig struct {
+    Level    string      `mapstructure:"level"`
+    Format   string      `mapstructure:"format"`
+    Output   string      `mapstructure:"output"`
+    FilePath string      `mapstructure:"file_path"`
+    Debug    DebugConfig `mapstructure:"debug"`
+}
+
+type DebugConfig struct {
+    Enabled          bool   `mapstructure:"enabled"`
+    PrintRequest     bool   `mapstructure:"print_request"`
+    PrintResponse    bool   `mapstructure:"print_response"`
+    MaxContentLength int    `mapstructure:"max_content_length"`
+}
+
 type ProxyConfig struct {
     Enabled       bool   `mapstructure:"enabled"`
     Default       string `mapstructure:"default"`
@@ -68,27 +84,24 @@ type ProxyConfig struct {
 }
 
 type GlobalConfig struct {
-    MaxRetries     int    `mapstructure:"max_retries"`
-    DefaultTimeout int    `mapstructure:"default_timeout"`
+    MaxRetries     int         `mapstructure:"max_retries"`
+    DefaultTimeout int         `mapstructure:"default_timeout"`
     ErrorCodes     struct {
         RetryOn []int `mapstructure:"retry_on"`
     } `mapstructure:"error_codes"`
-    Log struct {
-        Level    string `mapstructure:"level"`
-        Format   string `mapstructure:"format"`
-        Output   string `mapstructure:"output"`
-        FilePath string `mapstructure:"file_path"`
-    } `mapstructure:"log"`
-    Server struct {
-        Port         int    `mapstructure:"port"`
-        Host         string `mapstructure:"host"`
-        ReadTimeout  int    `mapstructure:"read_timeout"`
-        WriteTimeout int    `mapstructure:"write_timeout"`
-        IdleTimeout  int    `mapstructure:"idle_timeout"`
-    } `mapstructure:"server"`
+    Log           LogConfig    `mapstructure:"log"`
+    Server        ServerConfig `mapstructure:"server"`
     Proxy         ProxyConfig  `mapstructure:"proxy"`
     ConfigPaths   []string     `mapstructure:"config_paths"`
     Thinking      ThinkingConfig `mapstructure:"thinking"`
+}
+
+type ServerConfig struct {
+    Port         int    `mapstructure:"port"`
+    Host         string `mapstructure:"host"`
+    ReadTimeout  int    `mapstructure:"read_timeout"`
+    WriteTimeout int    `mapstructure:"write_timeout"`
+    IdleTimeout  int    `mapstructure:"idle_timeout"`
 }
 
 type ThinkingConfig struct {
@@ -108,8 +121,8 @@ type ChatCompletionRequest struct {
 }
 
 type ChatCompletionMessage struct {
-    Role    string `json:"role"`
-    Content string `json:"content"`
+    Role             string      `json:"role"`
+    Content          string      `json:"content"`
     ReasoningContent interface{} `json:"reasoning_content,omitempty"`
 }
 
@@ -134,20 +147,21 @@ type Usage struct {
     TotalTokens      int `json:"total_tokens"`
 }
 
-// 日志记录结构
+// RequestLogger 结构体
 type RequestLogger struct {
     RequestID string
     Model     string
     StartTime time.Time
     logs      []string
+    config    *Config
 }
 
-func NewRequestLogger(model string) *RequestLogger {
+func NewRequestLogger(config *Config) *RequestLogger {
     return &RequestLogger{
         RequestID: uuid.New().String(),
-        Model:     model,
         StartTime: time.Now(),
         logs:      make([]string, 0),
+        config:    config,
     }
 }
 
@@ -157,7 +171,38 @@ func (l *RequestLogger) Log(format string, args ...interface{}) {
     log.Printf("[RequestID: %s] %s", l.RequestID, msg)
 }
 
-// API Key 解析函数
+func (l *RequestLogger) LogContent(contentType string, content interface{}, maxLength int) {
+    if !l.config.Global.Log.Debug.Enabled {
+        return
+    }
+
+    sanitizedContent := sanitizeJSON(content)
+    truncatedContent := truncateContent(sanitizedContent, maxLength)
+    
+    l.Log("%s Content:\n%s", contentType, truncatedContent)
+}
+
+// 工具函数
+func truncateContent(content string, maxLength int) string {
+    if len(content) <= maxLength {
+        return content
+    }
+    return content[:maxLength] + "... (truncated)"
+}
+
+func sanitizeJSON(data interface{}) string {
+    sanitized, err := json.Marshal(data)
+    if err != nil {
+        return "Failed to marshal JSON"
+    }
+    
+    content := string(sanitized)
+    sensitivePattern := `"api_key":\s*"[^"]*"`
+    content = regexp.MustCompile(sensitivePattern).ReplaceAllString(content, `"api_key":"****"`)
+    
+    return content
+}
+
 func extractRealAPIKey(fullKey string) string {
     parts := strings.Split(fullKey, "-")
     if len(parts) >= 3 && (parts[0] == "deep" || parts[0] == "openai") {
@@ -174,7 +219,6 @@ func extractChannelID(fullKey string) string {
     return "1" // 默认渠道
 }
 
-// 安全的API Key日志记录
 func logAPIKey(key string) string {
     if len(key) <= 8 {
         return "****"
@@ -188,14 +232,12 @@ type Server struct {
     srv    *http.Server
 }
 
-// NewServer 创建服务器实例
 func NewServer(config *Config) *Server {
     return &Server{
         config: config,
     }
 }
 
-// Start 启动服务器
 func (s *Server) Start() error {
     mux := http.NewServeMux()
     mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
@@ -213,22 +255,35 @@ func (s *Server) Start() error {
     return s.srv.ListenAndServe()
 }
 
-// Shutdown 优雅关闭服务器
 func (s *Server) Shutdown(ctx context.Context) error {
     return s.srv.Shutdown(ctx)
 }
 
-// handleHealth 健康检查处理器
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 }
 
-// handleChatCompletions 处理聊天补全请求
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost {
         http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
         return
+    }
+
+    logger := NewRequestLogger(s.config)
+
+    // 读取请求体
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        logger.Log("Error reading request body: %v", err)
+        http.Error(w, "Failed to read request", http.StatusBadRequest)
+        return
+    }
+    r.Body = io.NopCloser(bytes.NewBuffer(body))
+
+    // 如果启用了请求内容打印
+    if s.config.Global.Log.Debug.PrintRequest {
+        logger.LogContent("Request", string(body), s.config.Global.Log.Debug.MaxContentLength)
     }
 
     var req ChatCompletionRequest
@@ -237,30 +292,26 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // 获取并解析 API Key
     fullAPIKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
     apiKey := extractRealAPIKey(fullAPIKey)
     channelID := extractChannelID(fullAPIKey)
 
-    logger := NewRequestLogger(req.Model)
     logger.Log("Received request with API Key: %s", logAPIKey(fullAPIKey))
     logger.Log("Extracted channel ID: %s", channelID)
     logger.Log("Extracted real API Key: %s", logAPIKey(apiKey))
 
-    // 获取目标通道
     targetChannel, ok := s.config.Channels[channelID]
     if !ok {
         http.Error(w, "Invalid channel", http.StatusBadRequest)
         return
     }
 
-    // 获取思考服务
     thinkingService := s.getHighestWeightThinkingService()
     logger.Log("Using thinking service: %s with API Key: %s", 
         thinkingService.Name, logAPIKey(thinkingService.APIKey))
 
     if req.Stream {
-        handler, err := NewStreamHandler(w, thinkingService, targetChannel)
+        handler, err := NewStreamHandler(w, thinkingService, targetChannel, s.config)
         if err != nil {
             http.Error(w, "Streaming not supported", http.StatusInternalServerError)
             return
@@ -272,7 +323,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
             return
         }
     } else {
-        // 处理非流式请求
         thinkingResp, err := s.processThinkingContent(r.Context(), &req, thinkingService)
         if err != nil {
             logger.Log("Error processing thinking content: %v", err)
@@ -288,7 +338,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-// getHighestWeightThinkingService 获取权重最高的思考服务
 func (s *Server) getHighestWeightThinkingService() ThinkingService {
     var highest ThinkingService
     maxWeight := -1
@@ -303,45 +352,36 @@ func (s *Server) getHighestWeightThinkingService() ThinkingService {
     return highest
 }
 
-// ThinkingResponse 结构体
 type ThinkingResponse struct {
     Content          string
     ReasoningContent string
     Confidence       float64
 }
 
-// 处理思考链内容
 func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletionRequest, 
     thinkingService ThinkingService) (*ThinkingResponse, error) {
+    
+    logger := NewRequestLogger(s.config)
     
     log.Printf("Getting thinking content from service: %s", thinkingService.Name)
     log.Printf("Using thinking service API Key: %s", logAPIKey(thinkingService.APIKey))
 
-    // 准备思考服务请求
     thinkingReq := *req
     thinkingReq.Model = thinkingService.Model
     thinkingReq.APIKey = thinkingService.APIKey
     
-    // 为思考链处理添加特殊提示
     thinkingPrompt := ChatCompletionMessage{
         Role:    "system",
         Content: "Please provide a detailed reasoning process for your response. Think step by step.",
     }
     thinkingReq.Messages = append([]ChatCompletionMessage{thinkingPrompt}, thinkingReq.Messages...)
     
+    // 记录思考服务请求
+    if s.config.Global.Log.Debug.PrintRequest {
+        logger.LogContent("Thinking Service Request", thinkingReq, s.config.Global.Log.Debug.MaxContentLength)
+    }
+    
     jsonData, err := json.Marshal(thinkingReq)
-    if err != nil {
-        return nil, fmt.Errorf("failed to marshal thinking request: %v", err)
-    }
-
-    client, err := createHTTPClient(thinkingService.Proxy, time.Duration(thinkingService.Timeout)*time.Second)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create HTTP client: %v", err)
-    }
-
-    request, err := http.NewRequestWithContext(ctx, "POST",
-        thinkingService.GetFullURL(),
-        bytes.NewBuffer(jsonData))
     if err != nil {
         return nil, fmt.Errorf("failed to create request: %v", err)
     }
@@ -357,13 +397,23 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
     }
     defer resp.Body.Close()
 
+    // 读取响应体
+    respBody, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read response body: %v", err)
+    }
+
+    // 记录思考服务响应
+    if s.config.Global.Log.Debug.PrintResponse {
+        logger.LogContent("Thinking Service Response", string(respBody), s.config.Global.Log.Debug.MaxContentLength)
+    }
+
     if resp.StatusCode != http.StatusOK {
-        body, _ := io.ReadAll(resp.Body)
-        return nil, fmt.Errorf("thinking service returned status %d: %s", resp.StatusCode, string(body))
+        return nil, fmt.Errorf("thinking service returned status %d: %s", resp.StatusCode, string(respBody))
     }
 
     var thinkingResp ChatCompletionResponse
-    if err := json.NewDecoder(resp.Body).Decode(&thinkingResp); err != nil {
+    if err := json.NewDecoder(bytes.NewReader(respBody)).Decode(&thinkingResp); err != nil {
         return nil, fmt.Errorf("failed to decode thinking response: %v", err)
     }
 
@@ -375,7 +425,6 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
         Content: thinkingResp.Choices[0].Message.Content,
     }
 
-    // 提取 reasoning_content
     if thinkingResp.Choices[0].Message.ReasoningContent != nil {
         switch v := thinkingResp.Choices[0].Message.ReasoningContent.(type) {
         case string:
@@ -391,13 +440,11 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
         }
     }
 
-    // 如果没有获取到 reasoning_content，使用 content 作为备选
     if result.ReasoningContent == "" {
         result.ReasoningContent = result.Content
         result.Content = "Based on the above reasoning."
     }
 
-    // 记录处理结果
     log.Printf("Processed thinking content:")
     log.Printf("- Content length: %d", len(result.Content))
     log.Printf("- Reasoning content length: %d", len(result.ReasoningContent))
@@ -405,13 +452,13 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
     return result, nil
 }
 
-// prepareEnhancedRequest 准备增强的请求
 func (s *Server) prepareEnhancedRequest(originalReq *ChatCompletionRequest, 
     thinkingResp *ThinkingResponse) *ChatCompletionRequest {
     
+    logger := NewRequestLogger(s.config)
+    
     enhancedReq := *originalReq
 
-    // 构建系统提示
     systemPrompt := fmt.Sprintf(`Based on the following reasoning process:
 Reasoning: %s
 
@@ -422,24 +469,34 @@ Please provide a response that incorporates this analysis while maintaining natu
         thinkingResp.ReasoningContent,
         thinkingResp.Content)
 
-    // 添加系统消息
     enhancedReq.Messages = append([]ChatCompletionMessage{{
         Role:    "system",
         Content: systemPrompt,
     }}, enhancedReq.Messages...)
 
+    // 记录增强后的请求
+    if s.config.Global.Log.Debug.PrintRequest {
+        logger.LogContent("Enhanced Request", enhancedReq, s.config.Global.Log.Debug.MaxContentLength)
+    }
+
     return &enhancedReq
 }
 
-// forwardRequest 转发请求到目标通道
 func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req *ChatCompletionRequest, 
     targetChannel Channel) {
+    
+    logger := NewRequestLogger(s.config)
     
     log.Printf("Forwarding request details:")
     log.Printf("- Channel: %s", targetChannel.Name)
     log.Printf("- URL: %s", targetChannel.GetFullURL())
     log.Printf("- Model: %s", req.Model)
     log.Printf("- Input API Key: %s", logAPIKey(req.APIKey))
+    
+    // 打印请求内容
+    if s.config.Global.Log.Debug.PrintRequest {
+        logger.LogContent("Forward Request", req, s.config.Global.Log.Debug.MaxContentLength)
+    }
     
     jsonData, err := json.Marshal(req)
     if err != nil {
@@ -477,9 +534,21 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
     }
     defer resp.Body.Close()
 
+    // 读取响应体
+    respBody, err := io.ReadAll(resp.Body)
+    if err != nil {
+        log.Printf("Error reading response body: %v", err)
+        http.Error(w, "Failed to read response", http.StatusInternalServerError)
+        return
+    }
+
+    // 打印响应内容
+    if s.config.Global.Log.Debug.PrintResponse {
+        logger.LogContent("Forward Response", string(respBody), s.config.Global.Log.Debug.MaxContentLength)
+    }
+
     if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        body, _ := io.ReadAll(resp.Body)
-        log.Printf("Error response from target: Status: %d, Body: %s", resp.StatusCode, string(body))
+        log.Printf("Error response from target: Status: %d, Body: %s", resp.StatusCode, string(respBody))
         http.Error(w, fmt.Sprintf("Target server error: %s", resp.Status), resp.StatusCode)
         return
     }
@@ -491,10 +560,7 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
     }
 
     w.WriteHeader(resp.StatusCode)
-
-    if _, err := io.Copy(w, resp.Body); err != nil {
-        log.Printf("Error copying response: %v", err)
-    }
+    w.Write(respBody)
 }
 
 // ThinkingStreamCollector 用于收集和处理思考链的流式输出
@@ -534,9 +600,11 @@ type StreamHandler struct {
     targetChannel   Channel
     writer          http.ResponseWriter
     flusher         http.Flusher
+    config          *Config
 }
 
-func NewStreamHandler(w http.ResponseWriter, thinkingService ThinkingService, targetChannel Channel) (*StreamHandler, error) {
+func NewStreamHandler(w http.ResponseWriter, thinkingService ThinkingService, 
+    targetChannel Channel, config *Config) (*StreamHandler, error) {
     flusher, ok := w.(http.Flusher)
     if !ok {
         return nil, fmt.Errorf("streaming not supported")
@@ -547,17 +615,20 @@ func NewStreamHandler(w http.ResponseWriter, thinkingService ThinkingService, ta
         targetChannel:   targetChannel,
         writer:         w,
         flusher:        flusher,
+        config:         config,
     }, nil
 }
 
 func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRequest) error {
+    logger := NewRequestLogger(h.config)
+
     h.writer.Header().Set("Content-Type", "text/event-stream")
     h.writer.Header().Set("Cache-Control", "no-cache")
     h.writer.Header().Set("Connection", "keep-alive")
 
     collector := &ThinkingStreamCollector{}
 
-    thinkingContent, err := h.streamThinking(ctx, req, collector)
+    thinkingContent, err := h.streamThinking(ctx, req, collector, logger)
     if err != nil {
         return fmt.Errorf("thinking stream error: %v", err)
     }
@@ -567,21 +638,29 @@ func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRe
     }
 
     finalReq := h.prepareFinalRequest(req, thinkingContent)
-    return h.streamFinalResponse(ctx, finalReq)
+    return h.streamFinalResponse(ctx, finalReq, logger)
 }
 
-func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionRequest, collector *ThinkingStreamCollector) (string, error) {
+func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionRequest, 
+    collector *ThinkingStreamCollector, logger *RequestLogger) (string, error) {
+    
     thinkingReq := *req
     thinkingReq.Stream = true
     thinkingReq.Model = h.thinkingService.Model
     thinkingReq.APIKey = h.thinkingService.APIKey
+
+    // 打印思考请求
+    if h.config.Global.Log.Debug.PrintRequest {
+        logger.LogContent("Thinking Stream Request", thinkingReq, h.config.Global.Log.Debug.MaxContentLength)
+    }
 
     jsonData, err := json.Marshal(thinkingReq)
     if err != nil {
         return "", err
     }
 
-    client, err := createHTTPClient(h.thinkingService.Proxy, time.Duration(h.thinkingService.Timeout)*time.Second)
+    client, err := createHTTPClient(h.thinkingService.Proxy, 
+        time.Duration(h.thinkingService.Timeout)*time.Second)
     if err != nil {
         return "", fmt.Errorf("failed to create HTTP client: %v", err)
     }
@@ -645,6 +724,11 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
                 continue
             }
 
+            // 打印流式响应
+            if h.config.Global.Log.Debug.PrintResponse {
+                logger.LogContent("Thinking Stream Chunk", streamResp, h.config.Global.Log.Debug.MaxContentLength)
+            }
+
             h.writer.Write(line)
             h.flusher.Flush()
 
@@ -657,25 +741,35 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
     return collector.GetContent(), nil
 }
 
-func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest, thinkingContent string) *ChatCompletionRequest {
+func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest, 
+    thinkingContent string) *ChatCompletionRequest {
     finalReq := *originalReq
 
     thinkingMsg := ChatCompletionMessage{
         Role:    "system",
-        Content: fmt.Sprintf("Previous thinking process:\n%s\nPlease consider the above thinking process in your response.", thinkingContent),
+        Content: fmt.Sprintf("Previous thinking process:\n%s\nPlease consider the above thinking process in your response.", 
+            thinkingContent),
     }
 
     finalReq.Messages = append([]ChatCompletionMessage{thinkingMsg}, finalReq.Messages...)
     return &finalReq
 }
 
-func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatCompletionRequest) error {
+func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatCompletionRequest, 
+    logger *RequestLogger) error {
+    
+    // 打印最终请求
+    if h.config.Global.Log.Debug.PrintRequest {
+        logger.LogContent("Final Stream Request", req, h.config.Global.Log.Debug.MaxContentLength)
+    }
+
     jsonData, err := json.Marshal(req)
     if err != nil {
         return err
     }
 
-    client, err := createHTTPClient(h.targetChannel.Proxy, time.Duration(h.targetChannel.Timeout)*time.Second)
+    client, err := createHTTPClient(h.targetChannel.Proxy, 
+        time.Duration(h.targetChannel.Timeout)*time.Second)
     if err != nil {
         return fmt.Errorf("failed to create HTTP client: %v", err)
     }
@@ -711,6 +805,11 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
                 break
             }
             return err
+        }
+
+        // 打印流式响应
+        if h.config.Global.Log.Debug.PrintResponse {
+            logger.LogContent("Final Stream Chunk", string(line), h.config.Global.Log.Debug.MaxContentLength)
         }
 
         h.writer.Write(line)
@@ -877,46 +976,3 @@ func validateConfig(config *Config) error {
 }
 
 func main() {
-    // 设置日志格式 - 包含日期、时间（精确到微秒）、文件名和行号
-    log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-
-    // 加载配置文件
-    config, err := loadConfig()
-    if err != nil {
-        log.Fatalf("Failed to load config: %v", err)
-    }
-
-    // 输出使用的配置文件路径
-    log.Printf("Using config file: %s", viper.ConfigFileUsed())
-
-    // 创建服务器实例
-    server := NewServer(config)
-
-    // 处理优雅关闭 - 设置中断信号通道
-    done := make(chan os.Signal, 1)
-    signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-
-    // 在后台启动服务器
-    go func() {
-        if err := server.Start(); err != nil && err != http.ErrServerClosed {
-            log.Fatalf("Failed to start server: %v", err)
-        }
-    }()
-
-    log.Printf("Server started successfully")
-
-    // 等待中断信号
-    <-done
-    log.Print("Server stopping...")
-
-    // 创建关闭超时上下文
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-
-    // 优雅关闭服务器
-    if err := server.Shutdown(ctx); err != nil {
-        log.Printf("Server forced to shutdown: %v", err)
-    }
-
-    log.Print("Server stopped")
-}
