@@ -103,3 +103,57 @@ curl http://localhost:8080/v1/chat/completions \
 * 比如你的KEY是 sk-12345678 那么你要用渠道1，那么就输入 deep-1-sk-12345678
 
 
+## 系统架构
+
+```mermaid
+graph TB
+    subgraph 客户端["客户端应用"]
+        A[OpenAI兼容应用]
+    end
+
+    subgraph 代理服务器["DeepAI代理服务器"]
+        B[API网关]
+        C[密钥路由器]
+        D[请求处理器]
+        E[配置管理器]
+        F[负载均衡器]
+    end
+
+    subgraph 思考服务["思考服务集群"]
+        G[思考服务1]
+        H[思考服务2]
+        I[思考服务N]
+    end
+
+    subgraph 后端服务["LLM后端渠道"]
+        J[渠道1]
+        K[渠道2]
+        L[渠道N]
+    end
+
+    subgraph 配置系统["配置管理"]
+        M[config.yaml]
+    end
+
+    A -->|1.API请求:deep-channel-key| B
+    B -->|2.路由请求| C
+    C -->|3.提取渠道和密钥| D
+    D -->|4.获取配置| E
+    E -->|5.加载设置| M
+    D -->|6.选择服务| F
+    F -->|7.转发请求| 思考服务
+    G & H & I -->|8.生成推理过程| D
+    D -->|9.增强的请求| 后端服务
+    J & K & L -->|10.最终响应| D
+    D -->|11.流式/标准响应| B
+    B -->|12.OpenAI兼容响应| A
+
+    classDef primary fill:#2986cc,stroke:#1c5c91,color:white
+    classDef secondary fill:#93c47d,stroke:#6aa84f,color:white
+    classDef tertiary fill:#f6b26b,stroke:#e69138,color:white
+    classDef config fill:#c27ba0,stroke:#a64d79,color:white
+
+    class A,B,C,D,E,F primary
+    class G,H,I secondary
+    class J,K,L tertiary
+    class M config
