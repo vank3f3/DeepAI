@@ -46,7 +46,7 @@ thinking_services:
     api_key: "sk-xxxxxxxxxxxxxxxx"
     timeout: 600  # 秒
     retry: 2
-    weight: 100  # 权重越高优先级越高
+    weight: 100  # 权重越高优先级越高，按权重加权随机
     proxy: ""    # 可选代理设置，留空则不使用代理
 
 channels:
