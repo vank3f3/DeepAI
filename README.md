@@ -16,7 +16,7 @@ DeepAI 是一个代理服务器，旨在通过整合“思考链”过程来增�
 
 ## 快速开始
 
-1. **下载可执行文件:** 从 [发布版本](https://github.com/BlueSkyXN/DeepAI/releases) 部分下载适用于您平台的预编译可执行文件（或从源代码构建 - 请参阅下文）。
+1. **下载可执行文件:** 从 [发布版本](https://github.com/BlueSkyXN/DeepAI/releases) 部分下载适用于您平台的预编译可执行文件（或从源代码构建 - 请参阅下文）。或者从[工件](https://github.com/BlueSkyXN/DeepAI/actions)下载最新构建
 
 2. **配置:** 基于仓库中提供的 `config-example.yaml` 模板创建 `config.yaml` 配置文件。 **重要提示:** 您必须在此文件中配置您的思考服务和渠道。
 
