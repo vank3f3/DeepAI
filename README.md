@@ -10,7 +10,7 @@ DeepAI 是一个代理服务器，旨在通过整合“思考链”过程来增�
 - **API 密钥路由:**  采用独特的 API 密钥路由机制。API 密钥前缀决定了哪个后端渠道将处理请求，从而为服务使用提供精细的控制。
 - **流式和标准响应:**  支持聊天完成的流式和标准响应，为不同的应用程序需求提供灵活性。思考过程的实时流式传输增强了用户体验。
 - **加权思考服务选择:**  实现加权随机选择算法，用于从多个思考服务中进行选择，从而允许基于服务权重进行负载均衡和优先级排序。
-- **代理支持:**  支持 HTTP、HTTPS 和 SOCKS5 代理，用于连接思考服务和后端 LLM 渠道，适应各种网络环境。
+- **代理支持:**  支持 HTTP 和 SOCKS5 代理，用于连接思考服务和后端 LLM 渠道，适应各种网络环境。
 - **强大的日志记录:**  全面的请求日志记录，包括唯一的请求 ID、时间戳和内容日志记录（在调试模式下），以便进行有效的监控和调试。
 - **优雅关机:**  确保在接收到中断信号时平稳地关闭服务器，防止数据丢失并确保干净的退出。
 
@@ -22,25 +22,13 @@ DeepAI 是一个代理服务器，旨在通过整合“思考链”过程来增�
 
 3. **运行 DeepAI:** 执行下载的二进制文件。
 
-### Linux
-
-```bash
-chmod +x DeepAI-linux-amd64  # 或适用于您架构的二进制文件
-./DeepAI-linux-amd64
-```
-
-### macOS
-
-```bash
-chmod +x DeepAI-darwin-amd64 # 或适用于您架构的二进制文件
-./DeepAI-darwin-amd64
-```
-
 ### Windows
-
+直接在目录运行即可，推荐用ps命令行启动，同目录放置配置文件即可
 ```bash
-DeepAI-windows-amd64.exe # 或适用于您架构的二进制文件
+DeepAI-windows-amd64.exe
 ```
+### Linux等平台
+原理一致，都是提供HTTP服务
 
 ## 配置说明
 
@@ -50,19 +38,24 @@ DeepAI 通过 `config.yaml` 文件进行配置。仓库中提供了一个带有�
 
 ```yaml
 thinking_services:
-  - name: "deepseek-thinking"
-    base_url: "https://api.deepseek.com" # 您的思考服务 API 的 Base URL
-    api_path: "/v1/chat/completions"     # 聊天完成的 API 路径（如果与 /v1/chat/completions 不同）
-    api_key: "sk-xxxxxxxxxxxxxxxx"       # 您的思考服务的 API 密钥
-    model: "deepseek-reasoner"          # 用于思考的模型
+  - id: 1
+    name: "modelscope-deepseek-thinking"
+    model: "deepseek-ai/DeepSeek-R1"  # 模型配置
+    base_url: "https://api-inference.modelscope.cn"
+    api_path: "/v1/chat/completions"
+    api_key: "sk-xxxxxxxxxxxxxxxx"
+    timeout: 600  # 秒
+    retry: 2
+    weight: 100  # 权重越高优先级越高
+    proxy: ""    # 可选代理设置，留空则不使用代理
 
 channels:
   "1": # 渠道 ID（在 API 密钥前缀中使用）
-    name: "deepseek-channel"
-    base_url: "https://api.deepseek.com" # 您的目标 LLM API 的 Base URL
-    api_path: "/v1/chat/completions"     # 聊天完成的 API 路径（如果与 /v1/chat/completions 不同）
-    timeout: 30                           # 请求超时时间，单位秒
-    proxy: "http://localhost:1080"        # 此渠道的可选代理（例如，用于测试）
+    name: "modelscope-channel"
+    base_url: "https://api-inference.modelscope.cn"
+    api_path: "/v1/chat/completions"
+    timeout: 600
+    proxy: "socks5://127.0.0.1:7890"  # SOCKS5代理示例
 ```
 
 **主要配置部分:**
@@ -73,11 +66,13 @@ channels:
     * `api_key`: 用于向思考服务进行身份验证的 API 密钥。
     * `model`: 用于生成推理过程的模型。
     * `weight`: 加权随机选择的权重（权重越高，被选中的概率越高）。
+    * 目前只兼容OpenAI标准的接口，不支持其他接口，请自行编程转换或者使用OneAPI/NewAPI项目
 * **`channels`:** 定义后端 LLM 渠道。每个渠道由唯一的 ID（字符串键）标识，并需要：
     * `name`: 渠道的描述性名称。
     * `base_url`: 目标 LLM API 的 Base URL。
     * `timeout`: 发送到此渠道的请求超时时间，单位秒。
     * `proxy`: 发送到此渠道的请求的可选代理 URL。
+    * 目前只兼容OpenAI标准的接口，不支持其他接口，请自行编程转换或者使用OneAPI/NewAPI项目
 * **`global`:** 代理服务器的全局设置，包括服务器端口、超时时间、日志配置和代理设置。
 
 
@@ -90,7 +85,7 @@ curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer deep-1-sk-xxxx"  # 'deep-1-' 前缀路由到 ID 为 "1" 的渠道
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-chat",             # 目标 LLM 渠道的模型
+    "model": "command-r-plus",             # 目标 LLM 渠道的模型
     "messages": [{"role": "user", "content": "你好"}],
     "stream": true                       # 可选：设置为 true 以获得流式响应
   }'
@@ -102,12 +97,9 @@ curl http://localhost:8080/v1/chat/completions \
 
 `Bearer <api_provider>-<channel_id>-<your_real_api_key>`
 
-* `<api_provider>`:  `deep` 或 `openai`（当前支持的前缀，用于内部识别，可以扩展）。
-* `<channel_id>`:  在您的 `config.yaml` 中定义的渠道的 ID（例如，`1`、`2`、`my-channel`）。
+* `<api_provider>`:  目前指的是`deep`（小写）
+* `<channel_id>`:  在您的 `config.yaml` 中定义的渠道的 ID（例如，`1`、`2`）。
 * `<your_real_api_key>`: 您用于目标 LLM 服务的实际 API 密钥。
+* 比如你的KEY是 sk-12345678 那么你要用渠道1，那么就输入 deep-1-sk-12345678
 
-**API 密钥示例:**
-
-* `Bearer deep-1-sk-xxxxxxxxxxxxxxxx` (使用渠道 "1" 和 DeepSeek API)
-* `Bearer openai-2-sk-yyyyyyyyyyyyyyyy` (使用渠道 "2" 和 OpenAI API - 如果已配置)
 
