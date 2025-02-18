@@ -2,7 +2,7 @@
 thinking_services:
   - id: 1
     name: "modelscope-deepseek-thinking"
-    model: "deepseek-ai/DeepSeek-R1"  # 添加模型配置
+    model: "deepseek-ai/DeepSeek-R1"  # 模型配置
     base_url: "https://api-inference.modelscope.cn"
     api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
@@ -13,7 +13,7 @@ thinking_services:
   
   - id: 2
     name: "openai-thinking"
-    model: "o3-mini"  # 添加模型配置
+    model: "o3-mini"  #模型配置
     base_url: "https://api.openai.com"
     api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
