@@ -206,23 +206,25 @@ func sanitizeJSON(data interface{}) string {
 }
 
 func extractThinkTagContent(text string) string {
-	// 尝试匹配 Markdown 代码块形式：```think ... ```
-	re1 := regexp.MustCompile("(?is)```\\s*think\\s*(.*?)\\s*```")
-	if matches := re1.FindStringSubmatch(text); len(matches) > 1 {
-		return strings.TrimSpace(matches[1])
-	}
-	// 尝试匹配中括号形式：[think] ... [/think]
-	re2 := regexp.MustCompile("(?is)\$$think\$$(.*?)\$$/think\$$")
-	if matches := re2.FindStringSubmatch(text); len(matches) > 1 {
-		return strings.TrimSpace(matches[1])
-	}
-	// 尝试 inline "think:" 标记（不区分大小写）
-	lowerText := strings.ToLower(text)
-	idx := strings.Index(lowerText, "think:")
-	if idx != -1 {
-		return strings.TrimSpace(text[idx+len("think:"):])
-	}
-	return ""
+    // 尝试匹配 Markdown 代码块形式：```think ... ```
+    re1 := regexp.MustCompile(`(?is)` + "```\\s*think\\s*(.*?)\\s*```")
+    if matches := re1.FindStringSubmatch(text); len(matches) > 1 {
+        return strings.TrimSpace(matches[1])
+    }
+    
+    // 尝试匹配 XML 风格标签：<think>...</think>
+    re2 := regexp.MustCompile(`(?is)<think>(.*?)</think>`)
+    if matches := re2.FindStringSubmatch(text); len(matches) > 1 {
+        return strings.TrimSpace(matches[1])
+    }
+    
+    // 尝试 inline "think:" 标记（不区分大小写）
+    lowerText := strings.ToLower(text)
+    idx := strings.Index(lowerText, "think:")
+    if idx != -1 {
+        return strings.TrimSpace(text[idx+len("think:"):])
+    }
+    return ""
 }
 
 func extractRealAPIKey(fullKey string) string {
@@ -762,40 +764,40 @@ func NewStreamHandler(w http.ResponseWriter, thinkingService ThinkingService, ta
 
 // HandleRequest 流式处理：先从思考服务获取思考链，再构造最终请求
 func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRequest) error {
-	logger := NewRequestLogger(h.config)
-	collector := &ThinkingStreamCollector{}
+    logger := NewRequestLogger(h.config)
+    collector := &ThinkingStreamCollector{}
 
-	// 启动流式思考收集
-	thinkingContent, err := h.streamThinking(ctx, req, collector, logger)
-	if err != nil {
-		logger.Log("Error in thinking stream: %v", err)
-		// 如果流式思考失败，则不直接转发思考服务响应，
-		// 而使用默认提示构造最终请求
-		defaultThinking := "Let's approach this systematically."
-		finalReq := h.prepareFinalRequest(req, defaultThinking)
-		return h.streamFinalResponse(ctx, finalReq, logger)
-	}
+    // 启动流式思考收集
+    _, err := h.streamThinking(ctx, req, collector, logger) // 修改：不使用返回值，因为我们使用collector
+    if err != nil {
+        logger.Log("Error in thinking stream: %v", err)
+        // 如果流式思考失败，则不直接转发思考服务响应，
+        // 而使用默认提示构造最终请求
+        defaultThinking := "Let's approach this systematically."
+        finalReq := h.prepareFinalRequest(req, defaultThinking)
+        return h.streamFinalResponse(ctx, finalReq, logger)
+    }
 
-	// 三层处理：优先使用 reasoning_content，其次提取 think 标签，再使用完整内容
-	var finalThinking string
-	if rc := collector.GetReasoningContent(); strings.TrimSpace(rc) != "" {
-		finalThinking = rc
-	} else {
-		content := collector.GetContent()
-		if extracted := extractThinkTagContent(content); extracted != "" {
-			finalThinking = extracted
-		} else {
-			finalThinking = content
-		}
-	}
+    // 三层处理：优先使用 reasoning_content，其次提取 think 标签，再使用完整内容
+    var finalThinking string
+    if rc := collector.GetReasoningContent(); strings.TrimSpace(rc) != "" {
+        finalThinking = rc
+    } else {
+        content := collector.GetContent()
+        if extracted := extractThinkTagContent(content); extracted != "" {
+            finalThinking = extracted
+        } else {
+            finalThinking = content
+        }
+    }
 
-	if strings.TrimSpace(finalThinking) == "" {
-		logger.Log("Warning: No valid thinking content generated, using default prompt")
-		finalThinking = "Let's analyze this step by step."
-	}
+    if strings.TrimSpace(finalThinking) == "" {
+        logger.Log("Warning: No valid thinking content generated, using default prompt")
+        finalThinking = "Let's analyze this step by step."
+    }
 
-	finalReq := h.prepareFinalRequest(req, finalThinking)
-	return h.streamFinalResponse(ctx, finalReq, logger)
+    finalReq := h.prepareFinalRequest(req, finalThinking)
+    return h.streamFinalResponse(ctx, finalReq, logger)
 }
 
 // streamThinking 边收集边检查流式思考链
