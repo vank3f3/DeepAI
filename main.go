@@ -108,7 +108,7 @@ type ThinkingConfig struct {
 	Enabled          bool `mapstructure:"enabled"`
 	AddToAllRequests bool `mapstructure:"add_to_all_requests"`
 	Timeout          int  `mapstructure:"timeout"`
-	DisplayChain     bool `mapstructure:"display_chain"`      // 是否向客户端显示思考链
+	// DisplayChain     bool `mapstructure:"display_chain"`      // 不再需要
 	ChainPreProcess  bool `mapstructure:"chain_preprocess"`   // 是否预处理思考链
 }
 
@@ -387,10 +387,7 @@ func (s *Server) getWeightedRandomThinkingService() ThinkingService {
 	return thinkingServices[0]
 }
 
-// ThinkingResponse 保存思考服务返回的结果
-// - ActualReasoningContent 保存真实的思考链（供下游最终请求使用）。
-// - ReasoningContent 则是对客户端展示的占位文本（若非标准则显示“已深度思考 N 字符”）。
-// - IsStandardMode 标记是否为标准模式。
+// ThinkingResponse 保存思考服务返回的结果, 进行了修改
 type ThinkingResponse struct {
 	Content                string
 	ReasoningContent      string
@@ -398,7 +395,7 @@ type ThinkingResponse struct {
 	IsStandardMode        bool
 }
 
-// 非流式处理：解析思考服务响应
+// 非流式处理：解析思考服务响应, 进行了修改
 func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletionRequest,
 	thinkingService ThinkingService) (*ThinkingResponse, error) {
 
@@ -472,49 +469,38 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 		Content: thinkingResp.Choices[0].Message.Content,
 	}
 
-    // 尝试解析 reasoning_content
-    if thinkingResp.Choices[0].Message.ReasoningContent != nil {
-        rawRC := ""
-        switch v := thinkingResp.Choices[0].Message.ReasoningContent.(type) {
-        case string:
-            rawRC = strings.TrimSpace(v)
-        case map[string]interface{}:
-            if jsonBytes, err := json.Marshal(v); err == nil {
-                rawRC = strings.TrimSpace(string(jsonBytes))
-            }
-        }
+	// 尝试解析 reasoning_content
+	if thinkingResp.Choices[0].Message.ReasoningContent != nil {
+		rawRC := ""
+		switch v := thinkingResp.Choices[0].Message.ReasoningContent.(type) {
+		case string:
+			rawRC = strings.TrimSpace(v)
+		case map[string]interface{}:
+			if jsonBytes, err := json.Marshal(v); err == nil {
+				rawRC = strings.TrimSpace(string(jsonBytes))
+			}
+		}
 
-        if rawRC != "" {
-            result.IsStandardMode = true
-            if s.config.Global.Thinking.ChainPreProcess {
-                result.ActualReasoningContent = preprocessReasoningChain(rawRC)
-            } else {
-                result.ActualReasoningContent = rawRC
-            }
+		if rawRC != "" {
+			result.IsStandardMode = true
+			if s.config.Global.Thinking.ChainPreProcess {
+				result.ActualReasoningContent = preprocessReasoningChain(rawRC)
+			} else {
+				result.ActualReasoningContent = rawRC
+			}
+			result.ReasoningContent = "思考已完成" // 简化处理
+			return result, nil
+		}
+	}
 
-            // 根据配置决定是否显示给客户端
-            if s.config.Global.Thinking.DisplayChain {
-                result.ReasoningContent = result.ActualReasoningContent
-            } else {
-                 result.ReasoningContent = "思考已完成"
-            }
-            return result, nil
-        }
-    }
-
-    // 非标准模式处理
-    result.IsStandardMode = false
-    result.ActualReasoningContent = result.Content  // 用于下游API
-        // 配置控制客户端显示
-    if s.config.Global.Thinking.DisplayChain {
-        result.ReasoningContent = fmt.Sprintf("非标准思考过程: %s", result.Content)
-    } else {
-        result.ReasoningContent = "思考已完成"
-    }
+	// 非标准模式处理
+	result.IsStandardMode = false
+	result.ActualReasoningContent = result.Content  // 用于下游API
+	result.ReasoningContent = "思考已完成"       // 简化处理
 	return result, nil
 }
 
-// 构造最终请求：将真实思考链（ActualReasoningContent）拼入系统提示
+// 构造最终请求：将真实思考链（ActualReasoningContent）拼入系统提示, 保留不变
 func (s *Server) prepareEnhancedRequest(originalReq *ChatCompletionRequest,
 	thinkingResp *ThinkingResponse) *ChatCompletionRequest {
 
@@ -681,7 +667,7 @@ func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context
 	w.Write(respBody)
 }
 
-// ThinkingStreamCollector 只需要收集 reasoning_content
+// ThinkingStreamCollector 只需要收集 reasoning_content, 修改
 type ThinkingStreamCollector struct {
 	reasoningBuffer strings.Builder
 	mu              sync.Mutex
@@ -760,7 +746,7 @@ func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRe
 	return h.streamFinalResponse(ctx, finalReq, logger)
 }
 
-// streamThinking：只负责从思考服务读取流，提取 reasoning_content，并转发所有原始 chunk
+// streamThinking：只负责从思考服务读取流，提取 reasoning_content，并转发所有原始 chunk, 重大修改
 func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionRequest,
 	collector *ThinkingStreamCollector, logger *RequestLogger) (string, error) {
 
@@ -773,8 +759,8 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 		"model":            thinkingReq.Model,
 		"messages":         thinkingReq.Messages,
 		"stream":           true,
-		"reasoning_effort": "high",
-		"temperature":      0.7,
+		"reasoning_effort": "high", // 示例，具体参数根据你的思考服务
+		"temperature":      0.7,   // 示例
 	}
 	jsonData, err := json.Marshal(requestData)
 	if err != nil {
@@ -783,392 +769,376 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 
 	client, err := createHTTPClient(h.thinkingService.Proxy,
 		time.Duration(h.thinkingService.Timeout)*time.Second)
-		if err != nil {
-			return "", fmt.Errorf("failed to create HTTP client: %v", err)
+	if err != nil {
+		return "", fmt.Errorf("failed to create HTTP client: %v", err)
+	}
+
+	request, err := http.NewRequestWithContext(ctx, "POST",
+		h.thinkingService.GetFullURL(),
+		bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+h.thinkingService.APIKey)
+
+	log.Printf("Starting thinking stream from: %s", h.thinkingService.GetFullURL())
+	resp, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("thinking service returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	reader := bufio.NewReader(resp.Body)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
 		}
-	
-		request, err := http.NewRequestWithContext(ctx, "POST",
-			h.thinkingService.GetFullURL(),
-			bytes.NewBuffer(jsonData))
+
+		line, err := reader.ReadString('\n')
 		if err != nil {
+			if err == io.EOF {
+				break
+			}
 			return "", err
 		}
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Authorization", "Bearer "+h.thinkingService.APIKey)
-	
-		log.Printf("Starting thinking stream from: %s", h.thinkingService.GetFullURL())
-		resp, err := client.Do(request)
-		if err != nil {
-			return "", err
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			return "", fmt.Errorf("thinking service returned status %d: %s", resp.StatusCode, string(body))
+		if !strings.HasPrefix(line, "data: ") {
+			continue
 		}
-	
-		reader := bufio.NewReader(resp.Body)
-	
-		for {
-			select {
-			case <-ctx.Done():
-				return "", ctx.Err()
-			default:
-			}
-	
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return "", err
-			}
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
-				collector.SetCompleted()
-				break
-			}
-	
-			var streamResp struct {
-				Choices []struct {
-					Delta struct {
-						Content          string `json:"content,omitempty"`
-						ReasoningContent string `json:"reasoning_content,omitempty"`
-					} `json:"delta"`
-					FinishReason *string `json:"finish_reason,omitempty"`
-				} `json:"choices"`
-			}
-			if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
-				log.Printf("Error parsing stream chunk: %v", err)
-				continue
-			}
-			if len(streamResp.Choices) == 0 {
-				continue
-			}
-	
-			choice := streamResp.Choices[0]
-			rcPart := strings.TrimSpace(choice.Delta.ReasoningContent)
-	
-			// 收集 reasoning_content
-			collector.WriteReasoning(rcPart)
-	
-	
-			// 原样转发整个 chunk 给客户端
-			sseResponse := fmt.Sprintf("data: %s\n\n", data) // 直接使用原始的 data
-			h.writer.Write([]byte(sseResponse))
-			h.flusher.Flush()
-	
-	
-			if choice.FinishReason != nil {
-				collector.SetCompleted()
-				break
-			}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			collector.SetCompleted()
+			break
 		}
-	
-		// 返回累积的 reasoning_content
-		return collector.GetReasoningContent(), nil
-	}
-	
-	func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest,
-		thinkingContent string) *ChatCompletionRequest {
-		finalReq := *originalReq
-		thinkingMsg := ChatCompletionMessage{
-			Role:    "system",
-			Content: fmt.Sprintf("Previous thinking process:\n%s\nPlease consider the above thinking process in your response.", thinkingContent),
+		var streamResp struct {
+			Choices []struct {
+				Delta struct {
+					Content          string `json:"content,omitempty"`
+					ReasoningContent string `json:"reasoning_content,omitempty"`
+				} `json:"delta"`
+				FinishReason *string `json:"finish_reason,omitempty"`
+			} `json:"choices"`
 		}
-		finalReq.Messages = append([]ChatCompletionMessage{thinkingMsg}, finalReq.Messages...)
-		return &finalReq
-	}
-	
-	func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatCompletionRequest,
-		logger *RequestLogger) error {
-	
-		if h.config.Global.Log.Debug.PrintRequest {
-			logger.LogContent("Final Stream Request", req, h.config.Global.Log.Debug.MaxContentLength)
+		if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
+			log.Printf("Error parsing stream chunk: %v", err)
+			continue
 		}
-	
-		jsonData, err := json.Marshal(req)
-		if err != nil {
-			return err
+		if len(streamResp.Choices) == 0 {
+			continue
 		}
-	
-		client, err := createHTTPClient(h.targetChannel.Proxy, time.Duration(h.targetChannel.Timeout)*time.Second)
-		if err != nil {
-			return fmt.Errorf("failed to create HTTP client: %v", err)
-		}
-	
-		request, err := http.NewRequestWithContext(ctx, "POST",
-			h.targetChannel.GetFullURL(),
-			bytes.NewBuffer(jsonData))
-		if err != nil {
-			return err
-		}
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Authorization", "Bearer "+req.APIKey)
-		log.Printf("Starting final response stream from: %s", h.targetChannel.GetFullURL())
-		resp, err := client.Do(request)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("target service returned status %d: %s", resp.StatusCode, string(body))
-		}
-		reader := bufio.NewReader(resp.Body)
-		var lastProcessedLine string
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return err
-			}
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
-				h.writer.Write([]byte("data: [DONE]\n\n"))
-				h.flusher.Flush()
-				break
-			}
-			if data == lastProcessedLine {
-				continue
-			}
-			lastProcessedLine = data
-			var jsonCheck map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &jsonCheck); err != nil {
-				log.Printf("Invalid JSON in response: %v", err)
-				continue
-			}
-			sseResponse := fmt.Sprintf("data: %s\n\n", data)
-			h.writer.Write([]byte(sseResponse))
-			h.flusher.Flush()
-			if h.config.Global.Log.Debug.PrintResponse {
-				logger.LogContent("Final Stream Chunk", string(sseResponse), h.config.Global.Log.Debug.MaxContentLength)
-			}
-		}
-		return nil
-	}
-	
-	// 思考链预处理函数(保留之前的实现)
-	func preprocessReasoningChain(chain string) string {
-		// 实现思考链的预处理逻辑，例如：
-		// - 移除非必要的提示文本
-		// - 格式化思考步骤
-		// - 提取关键推理过程
-		// 这里需要根据实际的思考链格式来实现
-	
-		// 示例实现
-		lines := strings.Split(chain, "\n")
-		var processed []string
-	
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			// 排除辅助性提示
-			if strings.HasPrefix(line, "Assistant:") ||
-				strings.HasPrefix(line, "System:") ||
-				strings.HasPrefix(line, "Note:") {
-				continue
-			}
-			if line != "" {
-				processed = append(processed, line)
-			}
-		}
-	
-		return strings.Join(processed, "\n")
-	}
-	
-	// SSE消息发送辅助函数(保留之前的实现)
-	func (h *StreamHandler) sendSSEMessage(msg interface{}) error {
-		sseBytes, err := json.Marshal(msg)
-		if err != nil {
-			return err
-		}
-	
-		sseResponse := fmt.Sprintf("data: %s\n\n", string(sseBytes))
+
+		choice := streamResp.Choices[0]
+		rcPart := strings.TrimSpace(choice.Delta.ReasoningContent)
+
+		// 收集 reasoning_content
+		collector.WriteReasoning(rcPart)
+
+		// 原样转发整个 chunk 给客户端
+		sseResponse := fmt.Sprintf("data: %s\n\n", data) // 直接使用原始的 data
 		h.writer.Write([]byte(sseResponse))
 		h.flusher.Flush()
-		return nil
+
+		if choice.FinishReason != nil {
+			collector.SetCompleted()
+			break
+		}
 	}
-	
-	// createHTTPClient 创建支持代理的 HTTP 客户端
-	func createHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
-		transport := &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		}
-		if proxyURL != "" {
-			parsedURL, err := url.Parse(proxyURL)
-			if err != nil {
-				return nil, fmt.Errorf("invalid proxy URL: %v", err)
-			}
-			switch parsedURL.Scheme {
-			case "http", "https":
-				transport.Proxy = http.ProxyURL(parsedURL)
-			case "socks5":
-				dialer, err := proxy.FromURL(parsedURL, proxy.Direct)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create SOCKS5 dialer: %v", err)
-				}
-				transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return dialer.Dial(network, addr)
-				}
-			default:
-				return nil, fmt.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
-			}
-		}
-		return &http.Client{
-			Transport: transport,
-			Timeout:   timeout,
-		}, nil
+
+	// 返回累积的 reasoning_content
+	return collector.GetReasoningContent(), nil
+}
+
+func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest,
+	thinkingContent string) *ChatCompletionRequest {
+	finalReq := *originalReq
+	thinkingMsg := ChatCompletionMessage{
+		Role:    "system",
+		Content: fmt.Sprintf("Previous thinking process:\n%s\nPlease consider the above thinking process in your response.", thinkingContent),
 	}
-	
-	func maskSensitiveHeaders(headers http.Header) http.Header {
-		masked := make(http.Header)
-		for k, v := range headers {
-			if k == "Authorization" {
-				masked[k] = []string{"Bearer ****"}
-			} else {
-				masked[k] = v
-			}
-		}
-		return masked
+	finalReq.Messages = append([]ChatCompletionMessage{thinkingMsg}, finalReq.Messages...)
+	return &finalReq
+}
+
+func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatCompletionRequest,
+	logger *RequestLogger) error {
+
+	if h.config.Global.Log.Debug.PrintRequest {
+		logger.LogContent("Final Stream Request", req, h.config.Global.Log.Debug.MaxContentLength)
 	}
-	
-	func loadConfig() (*Config, error) {
-		var configFile string
-		flag.StringVar(&configFile, "config", "", "path to config file")
-		flag.Parse()
-		viper.SetConfigType("yaml")
-		if configFile != "" {
-			viper.SetConfigFile(configFile)
-		} else {
-			ex, err := os.Executable()
-			if err != nil {
-				return nil, err
-			}
-			exePath := filepath.Dir(ex)
-			defaultPaths := []string{
-				filepath.Join(exePath, "config.yaml"),
-				filepath.Join(exePath, "conf", "config.yaml"),
-				"./config.yaml",
-				"./conf/config.yaml",
-			}
-			if os.PathSeparator == '\\' {
-				programData := os.Getenv("PROGRAMDATA")
-				if programData != "" {
-					defaultPaths = append(defaultPaths, filepath.Join(programData, "DeepAI", "config.yaml"))
-				}
-			} else {
-				defaultPaths = append(defaultPaths, "/etc/deepai/config.yaml")
-			}
-			for _, path := range defaultPaths {
-				viper.AddConfigPath(filepath.Dir(path))
-				if strings.Contains(path, ".yaml") {
-					viper.SetConfigName(strings.TrimSuffix(filepath.Base(path), ".yaml"))
-				}
-			}
-		}
-		if err := viper.ReadInConfig(); err != nil {
-			return nil, fmt.Errorf("failed to read config file: %v", err)
-		}
-		var config Config
-		if err := viper.Unmarshal(&config); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal config: %v", err)
-		}
-		if err := validateConfig(&config); err != nil {
-			return nil, fmt.Errorf("invalid configuration: %v", err)
-		}
-		return &config, nil
+
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return err
 	}
-	
-	func validateConfig(config *Config) error {
-		if len(config.ThinkingServices) == 0 {
-			return fmt.Errorf("no thinking services configured")
-		}
-		if len(config.Channels) == 0 {
-			return fmt.Errorf("no channels configured")
-		}
-		for _, service := range config.ThinkingServices {
-			if service.BaseURL == "" {
-				return fmt.Errorf("thinking service %s has no base URL", service.Name)
-			}
-			if service.APIKey == "" {
-				return fmt.Errorf("thinking service %s has no API key", service.Name)
-			}
-			if service.Timeout <= 0 {
-				return fmt.Errorf("thinking service %s has invalid timeout", service.Name)
-			}
-			if service.Model == "" {
-				return fmt.Errorf("thinking service %s has no model specified", service.Name)
-			}
-		}
-		for id, channel := range config.Channels {
-			if channel.BaseURL == "" {
-				return fmt.Errorf("channel %s has no base URL", id)
-			}
-			if channel.Timeout <= 0 {
-				return fmt.Errorf("channel %s has invalid timeout", id)
-			}
-		}
-		if config.Global.DefaultTimeout <= 0 {
-			return fmt.Errorf("invalid global default timeout")
-		}
-		if config.Global.Server.Port <= 0 {
-			return fmt.Errorf("invalid server port")
-		}
-		return nil
+
+	client, err := createHTTPClient(h.targetChannel.Proxy, time.Duration(h.targetChannel.Timeout)*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP client: %v", err)
 	}
-	
-	func main() {
-		// 设置日志格式：包含日期、时间（精确到微秒）、文件名和行号
-		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-		config, err := loadConfig()
+
+	request, err := http.NewRequestWithContext(ctx, "POST",
+		h.targetChannel.GetFullURL(),
+		bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+req.APIKey)
+	log.Printf("Starting final response stream from: %s", h.targetChannel.GetFullURL())
+	resp, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("target service returned status %d: %s", resp.StatusCode, string(body))
+	}
+	reader := bufio.NewReader(resp.Body)
+	var lastProcessedLine string
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		line, err := reader.ReadString('\n')
 		if err != nil {
-			log.Fatalf("Failed to load config: %v", err)
-		}
-		log.Printf("Using config file: %s", viper.ConfigFileUsed())
-		server := NewServer(config)
-		done := make(chan os.Signal, 1)
-		signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-		go func() {
-			if err := server.Start(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("Failed to start server: %v", err)
+			if err == io.EOF {
+				break
 			}
-		}()
-		log.Printf("Server started successfully")
-		<-done
-		log.Print("Server stopping...")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
-			log.Printf("Server forced to shutdown: %v", err)
+			return err
 		}
-		log.Print("Server stopped")
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			h.writer.Write([]byte("data: [DONE]\n\n"))
+			h.flusher.Flush()
+			break
+		}
+		if data == lastProcessedLine {
+			continue
+		}
+		lastProcessedLine = data
+		var jsonCheck map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &jsonCheck); err != nil {
+			log.Printf("Invalid JSON in response: %v", err)
+			continue
+		}
+		sseResponse := fmt.Sprintf("data: %s\n\n", data)
+		h.writer.Write([]byte(sseResponse))
+		h.flusher.Flush()
+		if h.config.Global.Log.Debug.PrintResponse {
+			logger.LogContent("Final Stream Chunk", string(sseResponse), h.config.Global.Log.Debug.MaxContentLength)
+		}
 	}
+	return nil
+}
+
+// 思考链预处理函数(保留之前的实现)
+func preprocessReasoningChain(chain string) string {
+	// 实现思考链的预处理逻辑，例如：
+	// - 移除非必要的提示文本
+	// - 格式化思考步骤
+	// - 提取关键推理过程
+	// 这里需要根据实际的思考链格式来实现
+
+	// 示例实现
+	lines := strings.Split(chain, "\n")
+	var processed []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// 排除辅助性提示
+		if strings.HasPrefix(line, "Assistant:") ||
+			strings.HasPrefix(line, "System:") ||
+			strings.HasPrefix(line, "Note:") {
+			continue
+		}
+		if line != "" {
+			processed = append(processed, line)
+		}
+	}
+
+	return strings.Join(processed, "\n")
+}
+
+// createHTTPClient 创建支持代理的 HTTP 客户端, 保留不变
+func createHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	if proxyURL != "" {
+		parsedURL, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid proxy URL: %v", err)
+		}
+		switch parsedURL.Scheme {
+		case "http", "https":
+			transport.Proxy = http.ProxyURL(parsedURL)
+		case "socks5":
+			dialer, err := proxy.FromURL(parsedURL, proxy.Direct)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create SOCKS5 dialer: %v", err)
+			}
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialer.Dial(network, addr)
+			}
+		default:
+			return nil, fmt.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
+		}
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}, nil
+}
+
+func maskSensitiveHeaders(headers http.Header) http.Header {
+	masked := make(http.Header)
+	for k, v := range headers {
+		if k == "Authorization" {
+			masked[k] = []string{"Bearer ****"}
+		} else {
+			masked[k] = v
+		}
+	}
+	return masked
+}
+
+func loadConfig() (*Config, error) {
+	var configFile string
+	flag.StringVar(&configFile, "config", "", "path to config file")
+	flag.Parse()
+	viper.SetConfigType("yaml")
+	if configFile != "" {
+		viper.SetConfigFile(configFile)
+	} else {
+		ex, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		exePath := filepath.Dir(ex)
+		defaultPaths := []string{
+			filepath.Join(exePath, "config.yaml"),
+			filepath.Join(exePath, "conf", "config.yaml"),
+			"./config.yaml",
+			"./conf/config.yaml",
+		}
+		if os.PathSeparator == '\\' {
+			programData := os.Getenv("PROGRAMDATA")
+			if programData != "" {
+				defaultPaths = append(defaultPaths, filepath.Join(programData, "DeepAI", "config.yaml"))
+			}
+		} else {
+			defaultPaths = append(defaultPaths, "/etc/deepai/config.yaml")
+		}
+		for _, path := range defaultPaths {
+			viper.AddConfigPath(filepath.Dir(path))
+			if strings.Contains(path, ".yaml") {
+				viper.SetConfigName(strings.TrimSuffix(filepath.Base(path), ".yaml"))
+			}
+		}
+	}
+	if err := viper.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("failed to read config file: %v", err)
+	}
+	var config Config
+	if err := viper.Unmarshal(&config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %v", err)
+	}
+	if err := validateConfig(&config); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %v", err)
+	}
+	return &config, nil
+}
+
+func validateConfig(config *Config) error {
+	if len(config.ThinkingServices) == 0 {
+		return fmt.Errorf("no thinking services configured")
+	}
+	if len(config.Channels) == 0 {
+		return fmt.Errorf("no channels configured")
+	}
+	for _, service := range config.ThinkingServices {
+		if service.BaseURL == "" {
+			return fmt.Errorf("thinking service %s has no base URL", service.Name)
+		}
+		if service.APIKey == "" {
+			return fmt.Errorf("thinking service %s has no API key", service.Name)
+		}
+		if service.Timeout <= 0 {
+			return fmt.Errorf("thinking service %s has invalid timeout", service.Name)
+		}
+		if service.Model == "" {
+			return fmt.Errorf("thinking service %s has no model specified", service.Name)
+		}
+	}
+	for id, channel := range config.Channels {
+		if channel.BaseURL == "" {
+			return fmt.Errorf("channel %s has no base URL", id)
+		}
+		if channel.Timeout <= 0 {
+			return fmt.Errorf("channel %s has invalid timeout", id)
+		}
+	}
+	if config.Global.DefaultTimeout <= 0 {
+		return fmt.Errorf("invalid global default timeout")
+	}
+	if config.Global.Server.Port <= 0 {
+		return fmt.Errorf("invalid server port")
+	}
+	return nil
+}
+
+func main() {
+	// 设置日志格式：包含日期、时间（精确到微秒）、文件名和行号
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+	config, err := loadConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+	log.Printf("Using config file: %s", viper.ConfigFileUsed())
+	server := NewServer(config)
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		if err := server.Start(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+	log.Printf("Server started successfully")
+	<-done
+	log.Print("Server stopping...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
+	}
+	log.Print("Server stopped")
+}
