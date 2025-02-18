@@ -198,13 +198,13 @@ func sanitizeJSON(data interface{}) string {
 	}
 
 	content := string(sanitized)
+	// 使用原生字符串字面量，防止转义错误
 	sensitivePattern := `"api_key":\s*"[^"]*"`
 	content = regexp.MustCompile(sensitivePattern).ReplaceAllString(content, `"api_key":"****"`)
 
 	return content
 }
 
-// extractThinkTagContent 尝试从文本中提取think标签式的思考链
 func extractThinkTagContent(text string) string {
 	// 尝试匹配 Markdown 代码块形式：```think ... ```
 	re1 := regexp.MustCompile("(?is)```\\s*think\\s*(.*?)\\s*```")
@@ -212,11 +212,11 @@ func extractThinkTagContent(text string) string {
 		return strings.TrimSpace(matches[1])
 	}
 	// 尝试匹配中括号形式：[think] ... [/think]
-	re2 := regexp.MustCompile(`(?is)\$\$think\$\$(.*?)\$\$/think\$\$`)
+	re2 := regexp.MustCompile("(?is)\$$think\$$(.*?)\$$/think\$$")
 	if matches := re2.FindStringSubmatch(text); len(matches) > 1 {
 		return strings.TrimSpace(matches[1])
 	}
-	// 尝试 inline "think:" 标记
+	// 尝试 inline "think:" 标记（不区分大小写）
 	lowerText := strings.ToLower(text)
 	idx := strings.Index(lowerText, "think:")
 	if idx != -1 {
@@ -254,7 +254,7 @@ type Server struct {
 	srv    *http.Server
 }
 
-// —— 新增一个全局的互斥锁 + rand.Rand，用于加权随机 —— //
+// 全局互斥锁和随机数生成器，用于按权重随机选服务
 var (
 	randMu  sync.Mutex
 	randGen = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -269,7 +269,7 @@ func NewServer(config *Config) *Server {
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", s.handleOpenAIRequests)
-	mux.HandleFunc("/v1/models", s.handleOpenAIRequests) // 使用同一个 handler 处理 /v1/models
+	mux.HandleFunc("/v1/models", s.handleOpenAIRequests)
 	mux.HandleFunc("/health", s.handleHealth)
 
 	s.srv = &http.Server{
@@ -294,7 +294,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
-	// 判断 Method
+	// 检查方法
 	if r.Method != http.MethodPost && r.URL.Path == "/v1/chat/completions" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -320,7 +320,7 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 如果是 /v1/models 请求
+	// 如果是 /v1/models 请求，直接转发
 	if r.URL.Path == "/v1/models" {
 		req := &ChatCompletionRequest{
 			APIKey: apiKey,
@@ -340,7 +340,6 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 	r.Body.Close()
 	r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-	// 如果启用了请求内容打印
 	if s.config.Global.Log.Debug.PrintRequest {
 		logger.LogContent("Request", string(body), s.config.Global.Log.Debug.MaxContentLength)
 	}
@@ -350,14 +349,14 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	req.APIKey = apiKey // 赋值解析后的 APIKey
+	req.APIKey = apiKey
 
-	// 根据权重随机选一个思考服务
+	// 根据权重选择思考服务
 	thinkingService := s.getWeightedRandomThinkingService()
 	logger.Log("Using thinking service: %s with API Key: %s",
 		thinkingService.Name, logAPIKey(thinkingService.APIKey))
 
-	// 如果是流式请求
+	// 如果是流式请求，走流式处理分支
 	if req.Stream {
 		handler, err := NewStreamHandler(w, thinkingService, targetChannel, s.config)
 		if err != nil {
@@ -367,11 +366,10 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 
 		if err := handler.HandleRequest(r.Context(), &req); err != nil {
 			logger.Log("Stream handler error: %v", err)
-			// 如果出错，可以在这里再写点错误信息给客户端
 			return
 		}
 	} else {
-		// 普通（非流式）请求
+		// 非流式处理（保持原有逻辑）
 		thinkingResp, err := s.processThinkingContent(r.Context(), &req, thinkingService)
 		if err != nil {
 			logger.Log("Error processing thinking content: %v", err)
@@ -385,7 +383,6 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// —— 改造成使用私有的 randGen 和互斥锁 —— //
 func (s *Server) getWeightedRandomThinkingService() ThinkingService {
 	thinkingServices := s.config.ThinkingServices
 	if len(thinkingServices) == 0 {
@@ -396,7 +393,6 @@ func (s *Server) getWeightedRandomThinkingService() ThinkingService {
 	for _, service := range thinkingServices {
 		totalWeight += service.Weight
 	}
-
 	if totalWeight <= 0 {
 		log.Println("Warning: Total weight of thinking services is not positive, using first service as default.")
 		return thinkingServices[0]
@@ -423,6 +419,7 @@ type ThinkingResponse struct {
 	ReasoningContent string
 }
 
+// 非流式思考处理（保持原有三层逻辑）
 func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletionRequest,
 	thinkingService ThinkingService) (*ThinkingResponse, error) {
 
@@ -441,7 +438,6 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 	}
 	thinkingReq.Messages = append([]ChatCompletionMessage{thinkingPrompt}, thinkingReq.Messages...)
 
-	// 记录思考服务请求
 	if s.config.Global.Log.Debug.PrintRequest {
 		logger.LogContent("Thinking Service Request", thinkingReq, s.config.Global.Log.Debug.MaxContentLength)
 	}
@@ -451,15 +447,12 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 		return nil, fmt.Errorf("failed to marshal thinking request: %v", err)
 	}
 
-	client, err := createHTTPClient(thinkingService.Proxy,
-		time.Duration(thinkingService.Timeout)*time.Second)
+	client, err := createHTTPClient(thinkingService.Proxy, time.Duration(thinkingService.Timeout)*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP client: %v", err)
 	}
 
-	request, err := http.NewRequestWithContext(ctx, "POST",
-		thinkingService.GetFullURL(),
-		bytes.NewBuffer(jsonData))
+	request, err := http.NewRequestWithContext(ctx, "POST", thinkingService.GetFullURL(), bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
@@ -480,7 +473,6 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 		return nil, fmt.Errorf("failed to read response body: %v", err)
 	}
 
-	// 记录思考服务响应
 	if s.config.Global.Log.Debug.PrintResponse {
 		logger.LogContent("Thinking Service Response", string(respBody), s.config.Global.Log.Debug.MaxContentLength)
 	}
@@ -493,7 +485,6 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 	if err := json.NewDecoder(bytes.NewReader(respBody)).Decode(&thinkingResp); err != nil {
 		return nil, fmt.Errorf("failed to decode thinking response: %v", err)
 	}
-
 	if len(thinkingResp.Choices) == 0 {
 		return nil, fmt.Errorf("thinking service returned no choices")
 	}
@@ -517,33 +508,25 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 		}
 	}
 
-	// 如果 reasoning_content 为空，则尝试提取 think 标签式的思考链
 	if result.ReasoningContent == "" {
 		extracted := extractThinkTagContent(result.Content)
 		if extracted != "" {
 			result.ReasoningContent = extracted
 			result.Content = "Based on the above reasoning."
 		} else {
-			// 都没识别成功则使用完整内容作为思考链
 			result.ReasoningContent = result.Content
 			result.Content = "Based on the above reasoning."
 		}
 	}
 
-	log.Printf("Processed thinking content:")
-	log.Printf("- Content length: %d", len(result.Content))
-	log.Printf("- Reasoning content length: %d", len(result.ReasoningContent))
-
+	log.Printf("Processed thinking content: Content length: %d, Reasoning content length: %d", len(result.Content), len(result.ReasoningContent))
 	return result, nil
 }
 
-func (s *Server) prepareEnhancedRequest(originalReq *ChatCompletionRequest,
-	thinkingResp *ThinkingResponse) *ChatCompletionRequest {
-
+func (s *Server) prepareEnhancedRequest(originalReq *ChatCompletionRequest, thinkingResp *ThinkingResponse) *ChatCompletionRequest {
 	logger := NewRequestLogger(s.config)
 
 	enhancedReq := *originalReq
-
 	systemPrompt := fmt.Sprintf(`Based on the following reasoning process:
 Reasoning: %s
 
@@ -553,7 +536,6 @@ And the conclusion:
 Please provide a response that incorporates this analysis while maintaining natural conversation flow.`,
 		thinkingResp.ReasoningContent,
 		thinkingResp.Content)
-
 	enhancedReq.Messages = append([]ChatCompletionMessage{{
 		Role:    "system",
 		Content: systemPrompt,
@@ -562,22 +544,14 @@ Please provide a response that incorporates this analysis while maintaining natu
 	if s.config.Global.Log.Debug.PrintRequest {
 		logger.LogContent("Enhanced Request", enhancedReq, s.config.Global.Log.Debug.MaxContentLength)
 	}
-
 	return &enhancedReq
 }
 
-func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req *ChatCompletionRequest,
-	targetChannel Channel) {
-
+func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req *ChatCompletionRequest, targetChannel Channel) {
 	logger := NewRequestLogger(s.config)
 
-	log.Printf("Forwarding request details:")
-	log.Printf("- Channel: %s", targetChannel.Name)
-	log.Printf("- URL: %s", targetChannel.GetFullURL())
-	log.Printf("- Model: %s", req.Model)
-	log.Printf("- Input API Key: %s", logAPIKey(req.APIKey))
-
-	// 打印请求内容
+	log.Printf("Forwarding request details: Channel: %s, URL: %s, Model: %s, Input API Key: %s",
+		targetChannel.Name, targetChannel.GetFullURL(), req.Model, logAPIKey(req.APIKey))
 	if s.config.Global.Log.Debug.PrintRequest {
 		logger.LogContent("Forward Request", req, s.config.Global.Log.Debug.MaxContentLength)
 	}
@@ -596,18 +570,14 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
 		return
 	}
 
-	request, err := http.NewRequestWithContext(ctx, "POST",
-		targetChannel.GetFullURL(),
-		bytes.NewBuffer(jsonData))
+	request, err := http.NewRequestWithContext(ctx, "POST", targetChannel.GetFullURL(), bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("Error creating request: %v", err)
 		http.Error(w, "Failed to create request", http.StatusInternalServerError)
 		return
 	}
-
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+req.APIKey)
-
 	log.Printf("Request headers: %v", maskSensitiveHeaders(request.Header))
 
 	resp, err := client.Do(request)
@@ -625,7 +595,6 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
 		return
 	}
 
-	// 记录响应内容
 	if s.config.Global.Log.Debug.PrintResponse {
 		logger.LogContent("Forward Response", string(respBody), s.config.Global.Log.Debug.MaxContentLength)
 	}
@@ -641,7 +610,6 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
 			w.Header().Add(key, value)
 		}
 	}
-
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
 }
@@ -649,23 +617,17 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
 func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context, req *ChatCompletionRequest, targetChannel Channel) {
 	logger := NewRequestLogger(s.config)
 
-	log.Printf("Forwarding /v1/models request details:")
-	log.Printf("- Channel: %s", targetChannel.Name)
-
+	log.Printf("Forwarding /v1/models request details: Channel: %s", targetChannel.Name)
 	fullChatURL := targetChannel.GetFullURL()
-	log.Printf("- Full Chat URL: %s", fullChatURL)
-
 	parsedChatURL, err := url.Parse(fullChatURL)
 	if err != nil {
 		log.Printf("Error parsing chat URL: %v", err)
 		http.Error(w, "Failed to parse chat URL", http.StatusInternalServerError)
 		return
 	}
-
 	baseURL := parsedChatURL.Scheme + "://" + parsedChatURL.Host
 	modelsURL := strings.TrimSuffix(baseURL, "/") + "/v1/models"
-	log.Printf("- Models URL: %s", modelsURL)
-	log.Printf("- Input API Key: %s", logAPIKey(req.APIKey))
+	log.Printf("Models URL: %s, Input API Key: %s", modelsURL, logAPIKey(req.APIKey))
 
 	client, err := createHTTPClient(targetChannel.Proxy, time.Duration(targetChannel.Timeout)*time.Second)
 	if err != nil {
@@ -674,17 +636,13 @@ func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context
 		return
 	}
 
-	request, err := http.NewRequestWithContext(ctx, "GET",
-		modelsURL,
-		nil)
+	request, err := http.NewRequestWithContext(ctx, "GET", modelsURL, nil)
 	if err != nil {
 		log.Printf("Error creating /v1/models request: %v", err)
 		http.Error(w, "Failed to create request", http.StatusInternalServerError)
 		return
 	}
-
 	request.Header.Set("Authorization", "Bearer "+req.APIKey)
-
 	log.Printf("Request headers for /v1/models: %v", maskSensitiveHeaders(request.Header))
 
 	resp, err := client.Do(request)
@@ -701,44 +659,70 @@ func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context
 		http.Error(w, "Failed to read response", http.StatusInternalServerError)
 		return
 	}
-
 	if s.config.Global.Log.Debug.PrintResponse {
 		logger.LogContent("/v1/models Response", string(respBody), s.config.Global.Log.Debug.MaxContentLength)
 	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		log.Printf("Error response from target for /v1/models: Status: %d, Body: %s", resp.StatusCode, string(respBody))
 		http.Error(w, fmt.Sprintf("Target server error: %s", resp.Status), resp.StatusCode)
 		return
 	}
-
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
-
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
 }
 
-// ThinkingStreamCollector 用于收集和处理思考链的流式输出
+// ---------------------- 流式处理部分 ----------------------
+
+// ThinkingStreamCollector 用于收集流式思考内容；分开存储普通内容和 reasoning_content
 type ThinkingStreamCollector struct {
-	buffer    strings.Builder
-	mu        sync.Mutex
-	completed bool
+	contentBuffer          strings.Builder
+	reasoningContentBuffer strings.Builder
+	validThinkingContent   string
+	mu                     sync.Mutex
+	completed              bool
 }
 
-func (tc *ThinkingStreamCollector) Write(p []byte) (n int, err error) {
+func (tc *ThinkingStreamCollector) WriteContent(content string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	return tc.buffer.Write(p)
+	tc.contentBuffer.WriteString(content)
+}
+
+func (tc *ThinkingStreamCollector) WriteReasoningContent(content string) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.reasoningContentBuffer.WriteString(content)
 }
 
 func (tc *ThinkingStreamCollector) GetContent() string {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	return tc.buffer.String()
+	return tc.contentBuffer.String()
+}
+
+func (tc *ThinkingStreamCollector) GetReasoningContent() string {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.reasoningContentBuffer.String()
+}
+
+func (tc *ThinkingStreamCollector) SetValidThinkingContent(content string) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	if tc.validThinkingContent == "" {
+		tc.validThinkingContent = content
+	}
+}
+
+func (tc *ThinkingStreamCollector) GetValidThinkingContent() string {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.validThinkingContent
 }
 
 func (tc *ThinkingStreamCollector) SetCompleted() {
@@ -762,13 +746,11 @@ type StreamHandler struct {
 	config          *Config
 }
 
-func NewStreamHandler(w http.ResponseWriter, thinkingService ThinkingService,
-	targetChannel Channel, config *Config) (*StreamHandler, error) {
+func NewStreamHandler(w http.ResponseWriter, thinkingService ThinkingService, targetChannel Channel, config *Config) (*StreamHandler, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return nil, fmt.Errorf("streaming not supported")
 	}
-
 	return &StreamHandler{
 		thinkingService: thinkingService,
 		targetChannel:   targetChannel,
@@ -778,39 +760,49 @@ func NewStreamHandler(w http.ResponseWriter, thinkingService ThinkingService,
 	}, nil
 }
 
+// HandleRequest 流式处理：先从思考服务获取思考链，再构造最终请求
 func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRequest) error {
 	logger := NewRequestLogger(h.config)
-
-	h.writer.Header().Set("Content-Type", "text/event-stream")
-	h.writer.Header().Set("Cache-Control", "no-cache")
-	h.writer.Header().Set("Connection", "keep-alive")
-
 	collector := &ThinkingStreamCollector{}
 
-	// 先从思考服务获取流式推理内容
+	// 启动流式思考收集
 	thinkingContent, err := h.streamThinking(ctx, req, collector, logger)
 	if err != nil {
-		return fmt.Errorf("thinking stream error: %v", err)
+		logger.Log("Error in thinking stream: %v", err)
+		// 如果流式思考失败，则不直接转发思考服务响应，
+		// 而使用默认提示构造最终请求
+		defaultThinking := "Let's approach this systematically."
+		finalReq := h.prepareFinalRequest(req, defaultThinking)
+		return h.streamFinalResponse(ctx, finalReq, logger)
 	}
 
-	if !collector.IsCompleted() {
-		return fmt.Errorf("thinking stream incomplete")
+	// 三层处理：优先使用 reasoning_content，其次提取 think 标签，再使用完整内容
+	var finalThinking string
+	if rc := collector.GetReasoningContent(); strings.TrimSpace(rc) != "" {
+		finalThinking = rc
+	} else {
+		content := collector.GetContent()
+		if extracted := extractThinkTagContent(content); extracted != "" {
+			finalThinking = extracted
+		} else {
+			finalThinking = content
+		}
 	}
 
-	// 针对流式输出也尝试提取 think 标签式的思考链
-	finalThinking := thinkingContent
-	if extracted := extractThinkTagContent(thinkingContent); extracted != "" {
-		finalThinking = extracted
+	if strings.TrimSpace(finalThinking) == "" {
+		logger.Log("Warning: No valid thinking content generated, using default prompt")
+		finalThinking = "Let's analyze this step by step."
 	}
 
-	// 拿到思考内容后，构造最终请求，继续流式返回
 	finalReq := h.prepareFinalRequest(req, finalThinking)
 	return h.streamFinalResponse(ctx, finalReq, logger)
 }
 
+// streamThinking 边收集边检查流式思考链
 func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionRequest,
 	collector *ThinkingStreamCollector, logger *RequestLogger) (string, error) {
 
+	// 修改请求为流式请求
 	thinkingReq := *req
 	thinkingReq.Stream = true
 	thinkingReq.Model = h.thinkingService.Model
@@ -823,30 +815,23 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 		"reasoning_effort": "high",
 		"temperature":      0.7,
 	}
-
 	jsonData, err := json.Marshal(requestData)
 	if err != nil {
 		return "", err
 	}
 
-	client, err := createHTTPClient(h.thinkingService.Proxy,
-		time.Duration(h.thinkingService.Timeout)*time.Second)
+	client, err := createHTTPClient(h.thinkingService.Proxy, time.Duration(h.thinkingService.Timeout)*time.Second)
 	if err != nil {
 		return "", fmt.Errorf("failed to create HTTP client: %v", err)
 	}
-
-	request, err := http.NewRequestWithContext(ctx, "POST",
-		h.thinkingService.GetFullURL(),
-		bytes.NewBuffer(jsonData))
+	request, err := http.NewRequestWithContext(ctx, "POST", h.thinkingService.GetFullURL(), bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", err
 	}
-
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+h.thinkingService.APIKey)
 
 	log.Printf("Starting thinking stream from: %s", h.thinkingService.GetFullURL())
-
 	resp, err := client.Do(request)
 	if err != nil {
 		return "", err
@@ -858,12 +843,12 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 		return "", fmt.Errorf("thinking service returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	reader := bufio.NewReader(resp.Body)
-	var reasoningContent strings.Builder
-	var lastLine string
+	// 使用临时缓冲区分别收集 content 和 reasoning_content
+	var tempContent, tempReasoning strings.Builder
+	hasValidThinking := false
 
+	reader := bufio.NewReader(resp.Body)
 	for {
-		// —— 可选：在循环里检查 ctx 是否已取消 —— //
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -877,23 +862,19 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 			}
 			return "", err
 		}
-
 		line = strings.TrimSpace(line)
-		if line == "" || line == lastLine {
+		if line == "" {
 			continue
 		}
-		lastLine = line
-
+		if line == "data: [DONE]" {
+			collector.SetCompleted()
+			break
+		}
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 
 		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			collector.SetCompleted()
-			break
-		}
-
 		var streamResp struct {
 			Choices []struct {
 				Delta struct {
@@ -903,50 +884,44 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 				FinishReason *string `json:"finish_reason,omitempty"`
 			} `json:"choices"`
 		}
-
 		if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
-			log.Printf("Error parsing stream chunk: %v", err)
+			logger.Log("Error parsing stream chunk: %v", err)
 			continue
 		}
-
 		if len(streamResp.Choices) > 0 {
 			choice := streamResp.Choices[0]
-
-			// 处理 reasoning_content
+			// 分别累积数据
 			if choice.Delta.ReasoningContent != "" {
-				reasoningContent.WriteString(choice.Delta.ReasoningContent)
-				collector.Write([]byte(choice.Delta.ReasoningContent))
+				tempReasoning.WriteString(choice.Delta.ReasoningContent)
+				collector.WriteReasoningContent(choice.Delta.ReasoningContent)
+				// 检查是否满足简单有效性（例如长度大于10字符）
+				if !hasValidThinking && isValidThinkingContent(tempReasoning.String()) {
+					hasValidThinking = true
+				}
 			}
-
-			// 处理普通 content
 			if choice.Delta.Content != "" {
-				collector.Write([]byte(choice.Delta.Content))
+				tempContent.WriteString(choice.Delta.Content)
+				collector.WriteContent(choice.Delta.Content)
+				if !hasValidThinking && isValidThinkingContent(tempContent.String()) {
+					hasValidThinking = true
+				}
 			}
-
-			// 转发 SSE 响应给客户端 (只转发本次 chunk 的数据)
-			sseData := map[string]interface{}{
-				"choices": []map[string]interface{}{
-					{
-						"delta": map[string]interface{}{
-							"content":          choice.Delta.Content,
-							"reasoning_content": choice.Delta.ReasoningContent,
+			// 当已经收集到有效的思考内容后（任一累积超过设定阈值），可以选择向客户端发送最终结果的 SSE数据
+			if hasValidThinking {
+				sseData := map[string]interface{}{
+					"choices": []map[string]interface{}{
+						{
+							"delta": map[string]interface{}{
+								"content": choice.Delta.Content,
+							},
+							"finish_reason": choice.FinishReason,
 						},
-						"finish_reason": choice.FinishReason,
 					},
-				},
+				}
+				sseBytes, _ := json.Marshal(sseData)
+				h.writer.Write([]byte(fmt.Sprintf("data: %s\n\n", string(sseBytes))))
+				h.flusher.Flush()
 			}
-			sseBytes, _ := json.Marshal(sseData)
-			sseResponse := fmt.Sprintf("data: %s\n\n", string(sseBytes))
-
-			h.writer.Write([]byte(sseResponse))
-			h.flusher.Flush()
-
-			if h.config.Global.Log.Debug.PrintResponse {
-				logger.LogContent("Thinking Stream Chunk", streamResp,
-					h.config.Global.Log.Debug.MaxContentLength)
-			}
-
-			// 如果后端提示结束
 			if choice.FinishReason != nil {
 				collector.SetCompleted()
 				break
@@ -954,39 +929,43 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 		}
 	}
 
-	return reasoningContent.String(), nil
+	if !hasValidThinking {
+		return "", fmt.Errorf("no valid thinking content generated")
+	}
+	return collector.GetContent(), nil
 }
 
-func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatCompletionRequest,
-	logger *RequestLogger) error {
+// isValidThinkingContent 用于检查累积内容是否满足简单有效性要求
+func isValidThinkingContent(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) < 10 {
+		return false
+	}
+	// 可根据需要添加其他检查规则
+	return true
+}
 
+// streamFinalResponse 将最终请求的流式响应转发给客户端
+func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatCompletionRequest, logger *RequestLogger) error {
 	if h.config.Global.Log.Debug.PrintRequest {
 		logger.LogContent("Final Stream Request", req, h.config.Global.Log.Debug.MaxContentLength)
 	}
-
 	jsonData, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
-
-	client, err := createHTTPClient(h.targetChannel.Proxy,
-		time.Duration(h.targetChannel.Timeout)*time.Second)
+	client, err := createHTTPClient(h.targetChannel.Proxy, time.Duration(h.targetChannel.Timeout)*time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP client: %v", err)
 	}
-
-	request, err := http.NewRequestWithContext(ctx, "POST",
-		h.targetChannel.GetFullURL(),
-		bytes.NewBuffer(jsonData))
+	request, err := http.NewRequestWithContext(ctx, "POST", h.targetChannel.GetFullURL(), bytes.NewBuffer(jsonData))
 	if err != nil {
 		return err
 	}
-
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+req.APIKey)
 
 	log.Printf("Starting final response stream from: %s", h.targetChannel.GetFullURL())
-
 	resp, err := client.Do(request)
 	if err != nil {
 		return err
@@ -1000,15 +979,12 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
 
 	reader := bufio.NewReader(resp.Body)
 	var lastProcessedLine string
-
 	for {
-		// —— 可选：在循环里检查 ctx 是否已取消 —— //
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
@@ -1016,24 +992,19 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
 			}
 			return err
 		}
-
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			h.writer.Write([]byte("data: [DONE]\n\n"))
 			h.flusher.Flush()
 			break
 		}
-
-		// 避免重复行
 		if data == lastProcessedLine {
 			continue
 		}
@@ -1044,30 +1015,24 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
 			log.Printf("Invalid JSON in response: %v", err)
 			continue
 		}
-
 		sseResponse := fmt.Sprintf("data: %s\n\n", data)
 		h.writer.Write([]byte(sseResponse))
 		h.flusher.Flush()
 
 		if h.config.Global.Log.Debug.PrintResponse {
-			logger.LogContent("Final Stream Chunk", string(sseResponse),
-				h.config.Global.Log.Debug.MaxContentLength)
+			logger.LogContent("Final Stream Chunk", string(sseResponse), h.config.Global.Log.Debug.MaxContentLength)
 		}
 	}
-
 	return nil
 }
 
-func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest,
-	thinkingContent string) *ChatCompletionRequest {
+// prepareFinalRequest 在最终请求中注入系统提示（附加思考链）
+func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest, thinkingContent string) *ChatCompletionRequest {
 	finalReq := *originalReq
-
 	thinkingMsg := ChatCompletionMessage{
 		Role:    "system",
-		Content: fmt.Sprintf("Previous thinking process:\n%s\nPlease consider the above thinking process in your response.",
-			thinkingContent),
+		Content: fmt.Sprintf("Previous thinking process:\n%s\nPlease consider the above thinking process in your response.", thinkingContent),
 	}
-
 	finalReq.Messages = append([]ChatCompletionMessage{thinkingMsg}, finalReq.Messages...)
 	return &finalReq
 }
@@ -1091,7 +1056,6 @@ func createHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, err
 		if err != nil {
 			return nil, fmt.Errorf("invalid proxy URL: %v", err)
 		}
-
 		switch parsedURL.Scheme {
 		case "http", "https":
 			transport.Proxy = http.ProxyURL(parsedURL)
@@ -1107,14 +1071,13 @@ func createHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, err
 			return nil, fmt.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
 		}
 	}
-
 	return &http.Client{
 		Transport: transport,
 		Timeout:   timeout,
 	}, nil
 }
 
-// maskSensitiveHeaders 遮蔽敏感的header信息
+// maskSensitiveHeaders 遮蔽敏感header信息
 func maskSensitiveHeaders(headers http.Header) http.Header {
 	masked := make(http.Header)
 	for k, v := range headers {
@@ -1134,7 +1097,6 @@ func loadConfig() (*Config, error) {
 	flag.Parse()
 
 	viper.SetConfigType("yaml")
-
 	if configFile != "" {
 		viper.SetConfigFile(configFile)
 	} else {
@@ -1143,14 +1105,12 @@ func loadConfig() (*Config, error) {
 			return nil, err
 		}
 		exePath := filepath.Dir(ex)
-
 		defaultPaths := []string{
 			filepath.Join(exePath, "config.yaml"),
 			filepath.Join(exePath, "conf", "config.yaml"),
 			"./config.yaml",
 			"./conf/config.yaml",
 		}
-
 		if os.PathSeparator == '\\' {
 			programData := os.Getenv("PROGRAMDATA")
 			if programData != "" {
@@ -1159,7 +1119,6 @@ func loadConfig() (*Config, error) {
 		} else {
 			defaultPaths = append(defaultPaths, "/etc/deepai/config.yaml")
 		}
-
 		for _, path := range defaultPaths {
 			viper.AddConfigPath(filepath.Dir(path))
 			if strings.Contains(path, ".yaml") {
@@ -1171,16 +1130,13 @@ func loadConfig() (*Config, error) {
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("failed to read config file: %v", err)
 	}
-
 	var config Config
 	if err := viper.Unmarshal(&config); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %v", err)
 	}
-
 	if err := validateConfig(&config); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %v", err)
 	}
-
 	return &config, nil
 }
 
@@ -1189,11 +1145,9 @@ func validateConfig(config *Config) error {
 	if len(config.ThinkingServices) == 0 {
 		return fmt.Errorf("no thinking services configured")
 	}
-
 	if len(config.Channels) == 0 {
 		return fmt.Errorf("no channels configured")
 	}
-
 	for _, service := range config.ThinkingServices {
 		if service.BaseURL == "" {
 			return fmt.Errorf("thinking service %s has no base URL", service.Name)
@@ -1208,7 +1162,6 @@ func validateConfig(config *Config) error {
 			return fmt.Errorf("thinking service %s has no model specified", service.Name)
 		}
 	}
-
 	for id, channel := range config.Channels {
 		if channel.BaseURL == "" {
 			return fmt.Errorf("channel %s has no base URL", id)
@@ -1217,60 +1170,41 @@ func validateConfig(config *Config) error {
 			return fmt.Errorf("channel %s has invalid timeout", id)
 		}
 	}
-
 	if config.Global.DefaultTimeout <= 0 {
 		return fmt.Errorf("invalid global default timeout")
 	}
 	if config.Global.Server.Port <= 0 {
 		return fmt.Errorf("invalid server port")
 	}
-
 	return nil
 }
 
 func main() {
-	// 设置日志格式 - 包含日期、时间（精确到微秒）、文件名和行号
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
 
-	// 不再在这里执行 rand.Seed(...)，而是使用上面的 randGen
-
-	// 加载配置文件
 	config, err := loadConfig()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
-
-	// 输出使用的配置文件路径
 	log.Printf("Using config file: %s", viper.ConfigFileUsed())
 
-	// 创建服务器实例
 	server := NewServer(config)
-
-	// 处理优雅关闭
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
-	// 在后台启动服务器
 	go func() {
 		if err := server.Start(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
-
 	log.Printf("Server started successfully")
 
-	// 等待中断信号
 	<-done
 	log.Print("Server stopping...")
-
-	// 创建关闭超时上下文
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	// 优雅关闭服务器
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
-
 	log.Print("Server stopped")
 }
