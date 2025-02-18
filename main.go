@@ -619,7 +619,7 @@ func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context
 	log.Printf("- Channel: %s", targetChannel.Name)
 
 	fullChatURL := targetChannel.GetFullURL()
-	log.Printf(""- Full Chat URL: %s", fullChatURL)
+	log.Printf("- Full Chat URL: %s", fullChatURL)
 	parsedChatURL, err := url.Parse(fullChatURL)
 	if err != nil {
 		log.Printf("Error parsing chat URL: %v", err)
@@ -902,85 +902,85 @@ func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest,
 // streamFinalResponse 函数
 func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatCompletionRequest,
 	logger *RequestLogger) error {
-
-	if h.config.Global.Log.Debug.PrintRequest {
-		logger.LogContent("Final Stream Request", req, h.config.Global.Log.Debug.MaxContentLength)
-	}
-
-	jsonData, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-
-	client, err := createHTTPClient(h.targetChannel.Proxy, time.Duration(h.targetChannel.Timeout)*time.Second)
-	if err != nil {
-		return fmt.Errorf("failed to create HTTP client: %v", err)
-	}
-
-	request, err := http.NewRequestWithContext(ctx, "POST",
-		h.targetChannel.GetFullURL(),
-		bytes.NewBuffer(jsonData))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+req.APIKey)
-	log.Printf("Starting final response stream from: %s", h.targetChannel.GetFullURL())
-	resp, err := client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("target service returned status %d: %s", resp.StatusCode, string(body))
-	}
-	reader := bufio.NewReader(resp.Body)
-	var lastProcessedLine string
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		// ... (streamFinalResponse 函数保持不变，这里省略 ...)
+		if h.config.Global.Log.Debug.PrintRequest {
+			logger.LogContent("Final Stream Request", req, h.config.Global.Log.Debug.MaxContentLength)
 		}
-		line, err := reader.ReadString('\n')
+	
+		jsonData, err := json.Marshal(req)
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
 			return err
 		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	
+		client, err := createHTTPClient(h.targetChannel.Proxy, time.Duration(h.targetChannel.Timeout)*time.Second)
+		if err != nil {
+			return fmt.Errorf("failed to create HTTP client: %v", err)
 		}
-		if !strings.HasPrefix(line, "data: ") {
-			continue
+	
+		request, err := http.NewRequestWithContext(ctx, "POST",
+			h.targetChannel.GetFullURL(),
+			bytes.NewBuffer(jsonData))
+		if err != nil {
+			return err
 		}
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			h.writer.Write([]byte("data: [DONE]\n\n"))
+		request.Header().Set("Content-Type", "application/json")
+		request.Header().Set("Authorization", "Bearer "+req.APIKey)
+		log.Printf("Starting final response stream from: %s", h.targetChannel.GetFullURL())
+		resp, err := client.Do(request)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("target service returned status %d: %s", resp.StatusCode, string(body))
+		}
+		reader := bufio.NewReader(resp.Body)
+		var lastProcessedLine string
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return err
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				h.writer.Write([]byte("data: [DONE]\n\n"))
+				h.flusher.Flush()
+				break
+			}
+			if data == lastProcessedLine {
+				continue
+			}
+			lastProcessedLine = data
+			var jsonCheck map[string]interface{}
+			if err := json.Unmarshal([]byte(data), &jsonCheck); err != nil {
+				log.Printf("Invalid JSON in response: %v", err)
+				continue
+			}
+			sseResponse := fmt.Sprintf("data: %s\n\n", data)
+			h.writer.Write([]byte(sseResponse))
 			h.flusher.Flush()
-			break
+			if h.config.Global.Log.Debug.PrintResponse {
+				logger.LogContent("Final Stream Chunk", string(sseResponse), h.config.Global.Log.Debug.MaxContentLength)
+			}
 		}
-		if data == lastProcessedLine {
-			continue
-		}
-		lastProcessedLine = data
-		var jsonCheck map[string]interface{}
-		if err := json.Unmarshal([]byte(data), &jsonCheck); err != nil {
-			log.Printf("Invalid JSON in response: %v", err)
-			continue
-		}
-		sseResponse := fmt.Sprintf("data: %s\n\n", data)
-		h.writer.Write([]byte(sseResponse))
-		h.flusher.Flush()
-		if h.config.Global.Log.Debug.PrintResponse {
-			logger.LogContent("Final Stream Chunk", string(sseResponse), h.config.Global.Log.Debug.MaxContentLength)
-		}
+		return nil
 	}
-	return nil
-}
 
 // preprocessReasoningChain 函数
 func preprocessReasoningChain(chain string) string {
