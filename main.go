@@ -212,7 +212,7 @@ func extractThinkTagContent(text string) string {
 		return strings.TrimSpace(matches[1])
 	}
 	// 尝试匹配中括号形式：[think] ... [/think]
-	re2 := regexp.MustCompile("(?is)\$$think\$$(.*?)\$$/think\$$")
+	re2 := regexp.MustCompile(`(?is)\$\$think\$\$(.*?)\$\$/think\$\$`)
 	if matches := re2.FindStringSubmatch(text); len(matches) > 1 {
 		return strings.TrimSpace(matches[1])
 	}
