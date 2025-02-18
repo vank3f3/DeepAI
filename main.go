@@ -688,6 +688,7 @@ type ThinkingStreamCollector struct {
 	mu              sync.Mutex
 	completed       bool
 	isStandardMode  bool
+	firstChunkSent bool // 新增：标记是否已发送第一个非标准模式的提示
 	config          *ThinkingConfig
 }
 
@@ -727,6 +728,7 @@ func (tc *ThinkingStreamCollector) IsCompleted() bool {
 	defer tc.mu.Unlock()
 	return tc.completed
 }
+
 // StreamHandler 处理流式请求
 type StreamHandler struct {
 	thinkingService ThinkingService
@@ -777,7 +779,7 @@ func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRe
 
 // streamThinking 实现流式读取思考服务结果
 // 检测前 checkChunks 个 chunk 是否包含非空 reasoning_content；
-// 如果有，则认为是标准模式，转发各 chunk；否则进入 fallback 模式，累积 content，待流结束后发送一次占位 SSE。
+// 如果有，则认为是标准模式，转发各 chunk；否则进入 fallback 模式，累积 content。
 func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionRequest,
 	collector *ThinkingStreamCollector, logger *RequestLogger) (string, error) {
 
@@ -883,40 +885,42 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 		// 检查模式
 		if chunkCount < checkChunks {
 			chunkCount++
+			if rcPart != "" {
+				collector.isStandardMode = true
+			}
 		}
 
-        // 根据模式和配置决定向客户端发送什么
-        if collector.isStandardMode && h.config.Global.Thinking.DisplayChain {
-            // 标准模式且允许显示
-            if rcPart != "" {
-                streamMsg := map[string]interface{}{
-                    "choices": []map[string]interface{}{
-                        {
-                            "delta": map[string]interface{}{
-                                "reasoning_content": rcPart,
-                            },
-                            "finish_reason": nil,
-                        },
-                    },
-                }
-                h.sendSSEMessage(streamMsg)
-            }
-        } else if chunkCount >= checkChunks && !collector.isStandardMode {
-            // 非标准模式，发送一次提示
-            streamMsg := map[string]interface{}{
-                "choices": []map[string]interface{}{
-                    {
-                        "delta": map[string]interface{}{
-                            "reasoning_content": "思考进行中...",
-                        },
-                        "finish_reason": nil,
-                    },
-                },
-            }
-            h.sendSSEMessage(streamMsg)
-            // 防止重复发送
-            chunkCount = checkChunks + 1
-        }
+		// 根据模式和配置决定向客户端发送什么
+		if collector.isStandardMode && h.config.Global.Thinking.DisplayChain {
+			// 标准模式且允许显示
+			if rcPart != "" {
+				streamMsg := map[string]interface{}{
+					"choices": []map[string]interface{}{
+						{
+							"delta": map[string]interface{}{
+								"reasoning_content": rcPart,
+							},
+							"finish_reason": nil,
+						},
+					},
+				}
+				h.sendSSEMessage(streamMsg)
+			}
+		} else if !collector.isStandardMode && h.config.Global.Thinking.DisplayChain && !collector.firstChunkSent {
+			// 非标准模式，显示思考链, 且是第一个chunk，发送一次提示
+			streamMsg := map[string]interface{}{
+				"choices": []map[string]interface{}{
+					{
+						"delta": map[string]interface{}{
+							"reasoning_content": "思考进行中...",
+						},
+						"finish_reason": nil,
+					},
+				},
+			}
+			h.sendSSEMessage(streamMsg)
+			collector.firstChunkSent = true // 标记已发送
+		}
 
 		if choice.FinishReason != nil {
 			collector.SetCompleted()
@@ -1029,7 +1033,7 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
 	return nil
 }
 
-// 6. 思考链预处理函数
+// 思考链预处理函数
 func preprocessReasoningChain(chain string) string {
 	// 实现思考链的预处理逻辑，例如：
 	// - 移除非必要的提示文本
@@ -1057,7 +1061,7 @@ func preprocessReasoningChain(chain string) string {
 	return strings.Join(processed, "\n")
 }
 
-// 7. SSE消息发送辅助函数
+// SSE消息发送辅助函数
 func (h *StreamHandler) sendSSEMessage(msg interface{}) error {
 	sseBytes, err := json.Marshal(msg)
 	if err != nil {
@@ -1069,6 +1073,7 @@ func (h *StreamHandler) sendSSEMessage(msg interface{}) error {
 	h.flusher.Flush()
 	return nil
 }
+
 // createHTTPClient 创建支持代理的 HTTP 客户端
 func createHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
 	transport := &http.Transport{
