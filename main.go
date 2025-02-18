@@ -108,6 +108,8 @@ type ThinkingConfig struct {
 	Enabled          bool `mapstructure:"enabled"`
 	AddToAllRequests bool `mapstructure:"add_to_all_requests"`
 	Timeout          int  `mapstructure:"timeout"`
+	DisplayChain     bool `mapstructure:"display_chain"`      // 是否向客户端显示思考链
+	ChainPreProcess  bool `mapstructure:"chain_preprocess"`   // 是否预处理思考链
 }
 
 // API相关结构
@@ -388,11 +390,12 @@ func (s *Server) getWeightedRandomThinkingService() ThinkingService {
 // ThinkingResponse 保存思考服务返回的结果
 // - ActualReasoningContent 保存真实的思考链（供下游最终请求使用）。
 // - ReasoningContent 则是对客户端展示的占位文本（若非标准则显示“已深度思考 N 字符”）。
+// - IsStandardMode 标记是否为标准模式。
 type ThinkingResponse struct {
 	Content                string
-	ReasoningContent       string
+	ReasoningContent      string
 	ActualReasoningContent string
-	Confidence             float64
+	IsStandardMode        bool
 }
 
 // 非流式处理：解析思考服务响应
@@ -468,36 +471,46 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 	result := &ThinkingResponse{
 		Content: thinkingResp.Choices[0].Message.Content,
 	}
-	// 尝试解析 reasoning_content
-	var rawRC string
-	if thinkingResp.Choices[0].Message.ReasoningContent != nil {
-		switch v := thinkingResp.Choices[0].Message.ReasoningContent.(type) {
-		case string:
-			rawRC = strings.TrimSpace(v)
-		case map[string]interface{}:
-			if jsonBytes, err := json.Marshal(v); err == nil {
-				rawRC = strings.TrimSpace(string(jsonBytes))
-			} else {
-				log.Printf("Warning: Failed to marshal reasoning content: %v", err)
-			}
-		default:
-			log.Printf("Warning: Unexpected reasoning_content type: %T", v)
-		}
-	}
-	// 如果标准返回中没有有效 reasoning_content，则使用 content 作为真实思考链，对客户端仅显示占位文本
-	if rawRC == "" {
-		result.ActualReasoningContent = result.Content
-		result.ReasoningContent = fmt.Sprintf("已深度思考 %d 字符", len(result.Content))
-	} else {
-		result.ActualReasoningContent = rawRC
-		result.ReasoningContent = rawRC
-	}
 
-	log.Printf("Processed thinking content:")
-	log.Printf("- Content length: %d", len(result.Content))
-	log.Printf("- Reasoning content (display) length: %d", len(result.ReasoningContent))
-	log.Printf("- Actual reasoning content length: %d", len(result.ActualReasoningContent))
+    // 尝试解析 reasoning_content
+    if thinkingResp.Choices[0].Message.ReasoningContent != nil {
+        rawRC := ""
+        switch v := thinkingResp.Choices[0].Message.ReasoningContent.(type) {
+        case string:
+            rawRC = strings.TrimSpace(v)
+        case map[string]interface{}:
+            if jsonBytes, err := json.Marshal(v); err == nil {
+                rawRC = strings.TrimSpace(string(jsonBytes))
+            }
+        }
 
+        if rawRC != "" {
+            result.IsStandardMode = true
+            if s.config.Global.Thinking.ChainPreProcess {
+                result.ActualReasoningContent = preprocessReasoningChain(rawRC)
+            } else {
+                result.ActualReasoningContent = rawRC
+            }
+
+            // 根据配置决定是否显示给客户端
+            if s.config.Global.Thinking.DisplayChain {
+                result.ReasoningContent = result.ActualReasoningContent
+            } else {
+                 result.ReasoningContent = "思考已完成"
+            }
+            return result, nil
+        }
+    }
+
+    // 非标准模式处理
+    result.IsStandardMode = false
+    result.ActualReasoningContent = result.Content  // 用于下游API
+        // 配置控制客户端显示
+    if s.config.Global.Thinking.DisplayChain {
+        result.ReasoningContent = fmt.Sprintf("非标准思考过程: %s", result.Content)
+    } else {
+        result.ReasoningContent = "思考已完成"
+    }
 	return result, nil
 }
 
@@ -668,23 +681,39 @@ func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context
 	w.Write(respBody)
 }
 
-// ThinkingStreamCollector 用于内部收集流式思考链
+// ThinkingStreamCollector 用于内部收集流式思考链, 并区分模式
 type ThinkingStreamCollector struct {
-	buffer    strings.Builder
-	mu        sync.Mutex
-	completed bool
+	contentBuffer    strings.Builder  // 累积content
+	reasoningBuffer  strings.Builder  // 累积reasoning_content
+	mu              sync.Mutex
+	completed       bool
+	isStandardMode  bool
+	config          *ThinkingConfig
 }
 
-func (tc *ThinkingStreamCollector) Write(p []byte) (n int, err error) {
+func (tc *ThinkingStreamCollector) Write(content, reasoning string) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	return tc.buffer.Write(p)
+
+	if content != "" {
+		tc.contentBuffer.WriteString(content)
+	}
+	if reasoning != "" {
+		tc.reasoningBuffer.WriteString(reasoning)
+		tc.isStandardMode = true
+	}
 }
 
 func (tc *ThinkingStreamCollector) GetContent() string {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	return tc.buffer.String()
+	return tc.contentBuffer.String()
+}
+
+func (tc *ThinkingStreamCollector) GetReasoningContent() string {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.reasoningBuffer.String()
 }
 
 func (tc *ThinkingStreamCollector) SetCompleted() {
@@ -698,7 +727,6 @@ func (tc *ThinkingStreamCollector) IsCompleted() bool {
 	defer tc.mu.Unlock()
 	return tc.completed
 }
-
 // StreamHandler 处理流式请求
 type StreamHandler struct {
 	thinkingService ThinkingService
@@ -729,7 +757,10 @@ func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRe
 	h.writer.Header().Set("Cache-Control", "no-cache")
 	h.writer.Header().Set("Connection", "keep-alive")
 
-	collector := &ThinkingStreamCollector{}
+	collector := &ThinkingStreamCollector{
+		config: &h.config.Global.Thinking,
+	}
+
 	// 获取流式思考链（区分标准和 fallback 模式）
 	thinkingContent, err := h.streamThinking(ctx, req, collector, logger)
 	if err != nil {
@@ -797,11 +828,7 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 
 	const checkChunks = 3
 	chunkCount := 0
-	standardMode := false // 标准模式：存在非空 reasoning_content
-	var accReasoning strings.Builder
-	var accFallback strings.Builder
 
-	// 在 fallback 模式下，我们不实时发送任何 chunk；等流结束后再发一次 placeholder。
 	for {
 		select {
 		case <-ctx.Done():
@@ -845,34 +872,51 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 		if len(streamResp.Choices) == 0 {
 			continue
 		}
+
 		choice := streamResp.Choices[0]
 		rcPart := strings.TrimSpace(choice.Delta.ReasoningContent)
 		ctPart := strings.TrimSpace(choice.Delta.Content)
 
+		// 收集内容
+		collector.Write(ctPart, rcPart)
+
+		// 检查模式
 		if chunkCount < checkChunks {
 			chunkCount++
-			if rcPart != "" {
-				standardMode = true
-			}
 		}
 
-		if standardMode {
-			// 标准模式：累计非空的 reasoning_content，并原样转发每个 chunk
-			if rcPart != "" {
-				accReasoning.WriteString(rcPart)
-				collector.Write([]byte(rcPart))
-			}
-			sseBytes, _ := json.Marshal(streamResp)
-			sseResponse := fmt.Sprintf("data: %s\n\n", string(sseBytes))
-			h.writer.Write([]byte(sseResponse))
-			h.flusher.Flush()
-		} else {
-			// Fallback 模式：累计所有 content，且不实时转发给客户端
-			if ctPart != "" {
-				accFallback.WriteString(ctPart)
-				collector.Write([]byte(ctPart))
-			}
-		}
+        // 根据模式和配置决定向客户端发送什么
+        if collector.isStandardMode && h.config.Global.Thinking.DisplayChain {
+            // 标准模式且允许显示
+            if rcPart != "" {
+                streamMsg := map[string]interface{}{
+                    "choices": []map[string]interface{}{
+                        {
+                            "delta": map[string]interface{}{
+                                "reasoning_content": rcPart,
+                            },
+                            "finish_reason": nil,
+                        },
+                    },
+                }
+                h.sendSSEMessage(streamMsg)
+            }
+        } else if chunkCount >= checkChunks && !collector.isStandardMode {
+            // 非标准模式，发送一次提示
+            streamMsg := map[string]interface{}{
+                "choices": []map[string]interface{}{
+                    {
+                        "delta": map[string]interface{}{
+                            "reasoning_content": "思考进行中...",
+                        },
+                        "finish_reason": nil,
+                    },
+                },
+            }
+            h.sendSSEMessage(streamMsg)
+            // 防止重复发送
+            chunkCount = checkChunks + 1
+        }
 
 		if choice.FinishReason != nil {
 			collector.SetCompleted()
@@ -880,26 +924,16 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 		}
 	}
 
-	// 流结束后：如果是 fallback 模式，则发送一次 placeholder SSE消息
-	if !standardMode {
-		placeholderMsg := map[string]interface{}{
-			"choices": []map[string]interface{}{
-				{
-					"delta": map[string]interface{}{
-						"content":           fmt.Sprintf("已深度思考 %d 字符", accFallback.Len()),
-						"reasoning_content": "",
-					},
-					"finish_reason": nil,
-				},
-			},
+	// 根据最终模式返回用于下游API的思考链
+	if collector.isStandardMode {
+		reasoningContent := collector.GetReasoningContent()
+		if h.config.Global.Thinking.ChainPreProcess {
+			return preprocessReasoningChain(reasoningContent), nil
 		}
-		sseBytes, _ := json.Marshal(placeholderMsg)
-		sseResponse := fmt.Sprintf("data: %s\n\n", string(sseBytes))
-		h.writer.Write([]byte(sseResponse))
-		h.flusher.Flush()
-		return accFallback.String(), nil
+		return reasoningContent, nil
 	}
-	return accReasoning.String(), nil
+
+	return collector.GetContent(), nil
 }
 
 func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest,
@@ -995,6 +1029,46 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
 	return nil
 }
 
+// 6. 思考链预处理函数
+func preprocessReasoningChain(chain string) string {
+	// 实现思考链的预处理逻辑，例如：
+	// - 移除非必要的提示文本
+	// - 格式化思考步骤
+	// - 提取关键推理过程
+	// 这里需要根据实际的思考链格式来实现
+
+	// 示例实现
+	lines := strings.Split(chain, "\n")
+	var processed []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// 排除辅助性提示
+		if strings.HasPrefix(line, "Assistant:") ||
+			strings.HasPrefix(line, "System:") ||
+			strings.HasPrefix(line, "Note:") {
+			continue
+		}
+		if line != "" {
+			processed = append(processed, line)
+		}
+	}
+
+	return strings.Join(processed, "\n")
+}
+
+// 7. SSE消息发送辅助函数
+func (h *StreamHandler) sendSSEMessage(msg interface{}) error {
+	sseBytes, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+
+	sseResponse := fmt.Sprintf("data: %s\n\n", string(sseBytes))
+	h.writer.Write([]byte(sseResponse))
+	h.flusher.Flush()
+	return nil
+}
 // createHTTPClient 创建支持代理的 HTTP 客户端
 func createHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
 	transport := &http.Transport{
