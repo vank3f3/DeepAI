@@ -577,8 +577,6 @@ func (s *Server) callThinkingService(ctx context.Context, userReq *ChatCompletio
     return tResp, nil
 }
 
-
-
 // ========== 拼装对最终模型的请求 ==========
 
 func (s *Server) prepareFinalRequest(userReq *ChatCompletionRequest, tResp *ThinkingResponse, logger *RequestLogger) *ChatCompletionRequest {
@@ -587,7 +585,7 @@ func (s *Server) prepareFinalRequest(userReq *ChatCompletionRequest, tResp *Thin
     // 根据是否为标准模型来构建不同的提示
     var systemPrompt string
     if tResp.IsStandardMode {
-        systemPrompt = fmt.Sprintf("Previous reasoning chain:\n%s\nPlease refine answer accordingly.", 
+        systemPrompt = fmt.Sprintf("Previous reasoning chain:\n%s\nPlease refine answer accordingly.",
             tResp.ActualReasoningContent)
     } else {
         systemPrompt = fmt.Sprintf(`Based on the following reasoning process:
@@ -693,6 +691,7 @@ func NewStreamHandler(w http.ResponseWriter, tSvc ThinkingService, ch Channel, c
 		channel:     ch,
 		config:      cfg,
 		logger:      logger,
+        thinkingComplete: false,
 	}, nil
 }
 
@@ -709,7 +708,7 @@ func (h *StreamHandler) Handle(ctx context.Context, userReq *ChatCompletionReque
 
     // 2.  检查思考过程是否完整
     if !h.thinkingComplete {
-        h.logger.Log("Warning: Thinking process might not have completed fully.")
+        h.logger.Log("Warning: Thinking process might not have completed fully.") //只是记录warning
     }
 
     // 3. 准备最终请求
@@ -862,14 +861,13 @@ func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatComplet
 
 	return nil
 }
-
 // prepareFinalRequest 准备最终请求
 func (h *StreamHandler) prepareFinalRequest(userReq *ChatCompletionRequest) *ChatCompletionRequest {
     finalReq := *userReq
 
     var systemPrompt string
     if h.isStdModel {
-        systemPrompt = fmt.Sprintf("Previous reasoning chain:\n%s\nPlease refine answer accordingly.", h.chainBuf.String())
+        systemPrompt = fmt.Sprintf("Previous reasoningchain:\n%s\nPlease refine answer accordingly.", h.chainBuf.String())
     } else {
         systemPrompt = fmt.Sprintf("Reasoning process:\n%s\n\nPlease provide the best answer.", h.chainBuf.String())
     }
@@ -885,7 +883,7 @@ func (h *StreamHandler) prepareFinalRequest(userReq *ChatCompletionRequest) *Cha
     return &finalReq
 }
 
-// 对后端模型发起流式请求
+// streamFinalResponse 向最终模型发起流式请求 (简化版)
 func (h *StreamHandler) streamFinalResponse(ctx context.Context, finalReq *ChatCompletionRequest) error {
     reqBody, _ := json.Marshal(finalReq)
     if h.config.Global.Log.Debug.PrintRequest {
@@ -915,28 +913,24 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, finalReq *ChatC
     }
 
     reader := bufio.NewReader(resp.Body)
-    receivedData := false // 标记是否收到过有效数据
-    timer := time.NewTimer(time.Duration(h.config.Global.DefaultTimeout) * time.Second) // 设置超时
-
-	defer timer.Stop()
+    timer := time.NewTimer(time.Duration(h.config.Global.DefaultTimeout) * time.Second)
+    defer timer.Stop()
 
     for {
         select {
         case <-ctx.Done():
             return ctx.Err()
         case <-timer.C:
-            if !receivedData {
-                h.logger.Log("Timeout waiting for final response")
-                // 返回自定义的错误信息（SSE 格式）
-                errMsg := map[string]string{"error": "Timeout waiting for response from final model."}
-                errBytes, _ := json.Marshal(errMsg)
-                h.w.Write([]byte("data: " + string(errBytes) + "\n\n"))
-                h.flusher.Flush()
-                return fmt.Errorf("timeout waiting for final response")
-            }
-            return nil // 超时，但已经收到过数据，则正常退出
+            h.logger.Log("Timeout waiting for final response")
+            // 发送超时错误（SSE 格式）
+            errMsg := map[string]string{"error": "Timeout waiting for response from final model."}
+            errBytes, _ := json.Marshal(errMsg)
+            h.w.Write([]byte("data: " + string(errBytes) + "\n\n"))
+            h.flusher.Flush()
+            return fmt.Errorf("timeout waiting for final response")
         default:
         }
+
         line, err := reader.ReadString('\n')
         if err != nil {
             if err == io.EOF {
@@ -949,61 +943,12 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, finalReq *ChatC
             continue
         }
 
-        // 不再强制要求 "data: " 开头
-        data := line
-        if strings.HasPrefix(line, "data: ") {
-            data = strings.TrimPrefix(line, "data: ")
-        }
-
-        if data == "[DONE]" {
-            h.w.Write([]byte("data: [DONE]\n\n"))
-            h.flusher.Flush()
-            break
-        }
-
-        // 尝试解析 JSON
-        var chunk map[string]interface{}
-        if jsonErr := json.Unmarshal([]byte(data), &chunk); jsonErr == nil {
-            // 检查是否有 "content" 字段 (或者 Cohere 对应的字段)
-            if content, ok := chunk["content"].(string); ok && content != "" {
-                // 构造 SSE 消息
-                sseData := fmt.Sprintf("data: %s\n\n", data) //直接发送data
-                h.w.Write([]byte(sseData))
-                h.flusher.Flush()
-                receivedData = true // 标记已收到有效数据
-                timer.Reset(time.Duration(h.config.Global.DefaultTimeout) * time.Second) //重设计时器
-            } else if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
-                // 如果是 choices 数组，尝试从中提取 content
-                if choice, ok := choices[0].(map[string]interface{}); ok {
-                    if delta, ok := choice["delta"].(map[string]interface{}); ok {
-                        if content, ok := delta["content"].(string); ok && content != "" {
-                            sseData := map[string]interface{}{
-                                "choices": []map[string]interface{}{
-                                    {
-                                        "delta": map[string]string{
-                                            "content": content,
-										},
-									},
-                                },
-                            }
-                            b, _ := json.Marshal(sseData)
-                            sseLine := "data: " + string(b) + "\n\n"
-                            _, _ = h.w.Write([]byte(sseLine))
-                            h.flusher.Flush()
-                            receivedData = true
-                            timer.Reset(time.Duration(h.config.Global.DefaultTimeout) * time.Second) //重设计时器
-                        }
-                    }
-                }
-            } else {
-                h.logger.Log("Received chunk but no content found: %s", line)
-			}
-        } else {
-            // 如果不是 JSON，也尝试直接发送（有些模型可能直接返回文本）
-            h.logger.Log("Failed to parse JSON, raw line: %s", line)
-            h.w.Write([]byte(data + "\n\n")) //直接发送原始数据
+        // 直接转发，不做任何解析
+        if strings.HasPrefix(line, "data: ") || strings.HasPrefix(line, "data:") {
+            h.w.Write([]byte(line + "\n\n"))
             h.flusher.Flush()
         }
+        timer.Reset(time.Duration(h.config.Global.DefaultTimeout) * time.Second) //重置计时器
     }
     return nil
 }
