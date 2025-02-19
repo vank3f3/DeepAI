@@ -81,9 +81,9 @@ type GlobalConfig struct {
 	ErrorCodes     struct {
 		RetryOn []int `mapstructure:"retry_on"`
 	} `mapstructure:"error_codes"`
-	Log    LogConfig      `mapstructure:"log"`
-	Server ServerConfig   `mapstructure:"server"`
-	Proxy  ProxyConfig    `mapstructure:"proxy"`
+	Log      LogConfig      `mapstructure:"log"`
+	Server   ServerConfig   `mapstructure:"server"`
+	Proxy    ProxyConfig    `mapstructure:"proxy"`
 	Thinking ThinkingConfig `mapstructure:"thinking"`
 }
 
@@ -546,7 +546,7 @@ func (s *Server) callThinkingService(ctx context.Context, userReq *ChatCompletio
 		Content: ccr.Choices[0].Message.Content,
 	}
 
-	// 判断是否有 reasoning_content（标准思考模型）
+	// 判断是否有 reasoning_content
 	if ccr.Choices[0].Message.ReasoningContent != nil {
 		raw := ""
 		switch v := ccr.Choices[0].Message.ReasoningContent.(type) {
@@ -565,8 +565,6 @@ func (s *Server) callThinkingService(ctx context.Context, userReq *ChatCompletio
 				tResp.ActualReasoningContent = raw
 			}
 			tResp.ReasoningContent = raw // 仅留作调试
-			// 按标准模式要求，丢弃思考服务返回的最终答案
-			tResp.Content = ""
 		}
 	}
 
@@ -582,26 +580,36 @@ func (s *Server) callThinkingService(ctx context.Context, userReq *ChatCompletio
 // ========== 拼装对最终模型的请求 ==========
 
 func (s *Server) prepareFinalRequest(userReq *ChatCompletionRequest, tResp *ThinkingResponse, logger *RequestLogger) *ChatCompletionRequest {
-	// 将思考链插入 system
-	finalReq := *userReq
-	var systemPrompt string
-	if tResp.IsStandardMode {
-		// 标准模式：仅传递思维链，不包含思考服务的结论
-		systemPrompt = fmt.Sprintf("Based on the following reasoning chain:\n%s\nPlease refine the answer accordingly.", tResp.ActualReasoningContent)
-	} else {
-		// 非标准模式：将整个思考服务输出作为分析结果传递
-		systemPrompt = fmt.Sprintf("Based on the following analysis:\n%s\nPlease provide the best answer accordingly.", tResp.ActualReasoningContent)
-	}
-	finalReq.Messages = append([]ChatCompletionMessage{
-		{Role: "system", Content: systemPrompt},
-	}, finalReq.Messages...)
+    // 将思考链插入 system
+    finalReq := *userReq
 
-	if s.config.Global.Log.Debug.PrintRequest {
-		logger.LogContent("Enhanced Final Request", finalReq, s.config.Global.Log.Debug.MaxContentLength)
-	}
-	return &finalReq
+    systemPrompt := fmt.Sprintf(`Based on the following reasoning process:
+%s
+
+Conclusion:
+%s
+
+Please provide the best answer accordingly.`, tResp.ActualReasoningContent, tResp.Content)
+
+    // 移除可能存在的旧的 system 消息
+    var newMessages []ChatCompletionMessage
+    for _, msg := range finalReq.Messages {
+        if msg.Role != "system" {
+            newMessages = append(newMessages, msg)
+        }
+    }
+    finalReq.Messages = newMessages
+
+    // 添加新的 system 消息
+    finalReq.Messages = append([]ChatCompletionMessage{
+        {Role: "system", Content: systemPrompt},
+    }, finalReq.Messages...)
+
+    if s.config.Global.Log.Debug.PrintRequest {
+        logger.LogContent("Enhanced Final Request", finalReq, s.config.Global.Log.Debug.MaxContentLength)
+    }
+    return &finalReq
 }
-
 // ========== 非流式 => 最终模型 ==========
 
 func (s *Server) forwardRequestNonStream(w http.ResponseWriter, finalReq *ChatCompletionRequest,
@@ -665,9 +673,9 @@ func (s *Server) forwardRequestNonStream(w http.ResponseWriter, finalReq *ChatCo
 
 // ========== 流式处理器 ==========
 
-// 1) 先流式调用思考服务 => 获取（或不获取）思考链
-// 2) 根据是否标准模式及用户需求，决定是否将思维链 SSE 传给前端（仅标准模式下显示思维链）
-// 3) 流式调用后置模型，将最终结果流式返回给用户
+// 1) 先流式思考服务 => 获取/或不获取 reasonChain
+// 2) 根据是否标准思考模型 + 用户需求，决定要不要把 reasoning_content 透传给用户
+// 3) 全部思考完毕后，再发起对后端channel的流式请求，把最终结果返回给用户
 
 type StreamHandler struct {
 	w           http.ResponseWriter
@@ -678,11 +686,11 @@ type StreamHandler struct {
 	logger      *RequestLogger
 
 	// 用于记录思考服务输出
-	isStdModel bool // 是否标准思考模型
+	isStdModel bool   // 是否标准思考模型
 	chainBuf   strings.Builder
 }
 
-// 新建流式处理器
+// 新建
 func NewStreamHandler(w http.ResponseWriter,
 	tSvc ThinkingService, ch Channel,
 	cfg *Config, logger *RequestLogger) (*StreamHandler, error) {
@@ -708,18 +716,19 @@ func (h *StreamHandler) Handle(ctx context.Context, userReq *ChatCompletionReque
 	h.w.Header().Set("Cache-Control", "no-cache")
 	h.w.Header().Set("Connection", "keep-alive")
 
-	// 1) 先向思考服务发起流式请求
+	// 1) 先向思考服务做流式请求
 	if err := h.streamThinking(ctx, userReq); err != nil {
 		return err
 	}
 
-	// 2) 拿到最终 chainBuf
-	finalChain := h.chainBuf.String()
+	// 2) 拿到最终 chainBuf (在 streamThinking 里已经处理)
+    finalChain := h.chainBuf.String()
+
 
 	// 3) 拼装对后端模型的请求
 	finalReq := h.prepareFinalRequest(userReq, finalChain)
 
-	// 4) 向后端模型发起流式请求，并将结果返回给用户
+	// 4) 向后端模型做流式请求，并把结果返回给用户
 	return h.streamFinalResponse(ctx, finalReq)
 }
 
@@ -819,28 +828,13 @@ func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatComplet
 			// 收集 reasoningContent
 			h.chainBuf.WriteString(rcPart)
 		} else {
-			// 如果非标准，则用 content 作为思考链
+			// 如果 reasoning_content 为空，可能是非标准 => content 作为思考链
 			if !h.isStdModel && c.Delta.Content != "" {
 				h.chainBuf.WriteString(c.Delta.Content)
 			}
 		}
 
-		// 如果是标准模型且有 reasoning_content，则 SSE 将其发送给前端
-		if h.isStdModel && rcPart != "" {
-			sseObj := map[string]interface{}{
-				"choices": []map[string]interface{}{
-					{
-						"delta": map[string]string{
-							"reasoning_content": rcPart,
-						},
-					},
-				},
-			}
-			b, _ := json.Marshal(sseObj)
-			sseLine := "data: " + string(b) + "\n\n"
-			_, _ = h.w.Write([]byte(sseLine))
-			h.flusher.Flush()
-		}
+		//  这里不再需要立即将思考内容发送给前端，因为 chainBuf 会在最后统一处理
 
 		if c.FinishReason != nil {
 			// 如果思考服务发了 finish_reason，则视为结束
@@ -853,15 +847,22 @@ func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatComplet
 // 准备最终请求
 func (h *StreamHandler) prepareFinalRequest(userReq *ChatCompletionRequest, chain string) *ChatCompletionRequest {
 	finalReq := *userReq
-	var systemPrompt string
-	if h.isStdModel {
-		systemPrompt = fmt.Sprintf("Previous reasoning chain:\n%s\nPlease refine answer accordingly.", chain)
-	} else {
-		systemPrompt = fmt.Sprintf("Based on the following analysis:\n%s\nPlease provide the best answer accordingly.", chain)
-	}
-	finalReq.Messages = append([]ChatCompletionMessage{
-		{Role: "system", Content: systemPrompt},
-	}, finalReq.Messages...)
+
+	systemPrompt := fmt.Sprintf("Previous reasoning chain:\n%s\nPlease refine answer accordingly.", chain)
+
+    // 移除可能存在的旧的 system 消息
+    var newMessages []ChatCompletionMessage
+    for _, msg := range finalReq.Messages {
+        if msg.Role != "system" {
+            newMessages = append(newMessages, msg)
+        }
+    }
+    finalReq.Messages = newMessages
+
+    // 添加新的 system 消息, 放到最前面
+    finalReq.Messages = append([]ChatCompletionMessage{
+        {Role: "system", Content: systemPrompt},
+    }, finalReq.Messages...)
 	return &finalReq
 }
 
