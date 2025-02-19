@@ -34,7 +34,7 @@ DeepAI-windows-amd64.exe
 
 DeepAI 通过 `config.yaml` 文件进行配置。仓库中提供了一个带有详细注释的 `config-example.yaml` 模板，以指导您完成配置选项。
 
-**最小化配置示例 (`config.yaml`):**
+**最小化配置示例 (`config.yaml`，不含全局配置，请从示例复制):**
 
 ```yaml
 thinking_services:
@@ -66,14 +66,20 @@ channels:
     * `api_key`: 用于向思考服务进行身份验证的 API 密钥。
     * `model`: 用于生成推理过程的模型。
     * `weight`: 加权随机选择的权重（权重越高，被选中的概率越高）。
+    * `reasoning_effort`: 推理令牌数量，选项："low"、"medium"、"high"，也可不填，不列出，置为空。默认不传。注意，Groq等傻逼平台传入这个会报错
+    * `reasoning_format`: 推理过程格式，选项："parsed"、"raw"、"hidden"，也可不填，不列出，置为空。默认不传。注意，Groq等平台用这个定义是ReasonContent/ThinkTag/RAW返回，请用parsed来获取思维链
+    * `temperature`: 温度参数（覆盖默认值0.7），未设置，则使用默认0.7
     * 目前只兼容OpenAI标准的接口，不支持其他接口，请自行编程转换或者使用OneAPI/NewAPI项目
+    * 目前不兼容think标签，因为测试发现要考虑的太多了
+
 * **`channels`:** 定义后端 LLM 渠道。每个渠道由唯一的 ID（字符串键）标识，并需要：
     * `name`: 渠道的描述性名称。
     * `base_url`: 目标 LLM API 的 Base URL。
     * `timeout`: 发送到此渠道的请求超时时间，单位秒。
     * `proxy`: 发送到此渠道的请求的可选代理 URL。
     * 目前只兼容OpenAI标准的接口，不支持其他接口，请自行编程转换或者使用OneAPI/NewAPI项目
-* **`global`:** 代理服务器的全局设置，包括服务器端口、超时时间、日志配置和代理设置。
+
+* **`global`:** 代理服务器的全局设置，包括服务器端口、超时时间、日志配置和代理设置。直接照抄示例是最佳选择
 
 
 ## API 使用示例

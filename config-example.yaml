@@ -6,14 +6,17 @@ thinking_services:
     base_url: "https://api-inference.modelscope.cn"
     api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
-    timeout: 600  # 秒
+    timeout: 600             # 请求超时时间，单位：秒
     retry: 2
-    weight: 100  # 权重越高优先级越高
-    proxy: ""    # 可选代理设置，留空则不使用代理
-  
+    weight: 100              # 权重越高优先级越高
+    proxy: ""                # 可选代理设置，留空则不使用代理，支持HTTP/SOCKS5
+    reasoning_effort: "high"   # 新增：推理令牌数量，选项："low"、"medium"、"high"，也可不填，不列出，置为空
+    reasoning_format: "parsed" # 新增：推理过程格式，选项："parsed"、"raw"、"hidden"，也可不填，不列出，置为空
+    temperature: 0.8           # 新增：温度参数（覆盖默认值0.7），未设置，则使用默认0.7
+
   - id: 2
     name: "openai-thinking"
-    model: "o3-mini"  #模型配置
+    model: "o3-mini"         # 模型配置
     base_url: "https://api.openai.com"
     api_path: "/v1/chat/completions"
     api_key: "sk-xxxxxxxxxxxxxxxx"
@@ -21,6 +24,7 @@ thinking_services:
     retry: 2
     weight: 50
     proxy: "http://127.0.0.1:7890"  # HTTP代理示例
+    reasoning_effort: "medium"   # 新增：推理令牌数量，选项："low"、"medium"、"high"
 
 # API通道配置
 channels:
@@ -39,15 +43,14 @@ channels:
     api_path: "/v1/chat/completions"
     timeout: 600
     proxy: "socks5://127.0.0.1:7890"  # SOCKS5代理示例
-  
-
 
 # 全局配置
 global:
   thinking:
-    enabled: true  # 全局启用思考链
-    add_to_all_requests: true  # 为所有请求添加思考链
-    timeout: 30  # 思考链处理超时时间
+    enabled: true             # 全局启用思考链
+    add_to_all_requests: true   # 为所有请求添加思考链
+    timeout: 300               # 思考链处理超时时间（秒）
+
   # 配置文件搜索路径
   config_paths:
     - "./config.yaml"           # 当前目录
@@ -57,13 +60,13 @@ global:
 
   # 代理配置
   proxy:
-    enabled: false  # 是否启用全局代理
-    default: ""    # 默认代理，留空则不使用。会被服务特定代理覆盖
-    allow_insecure: true  # 是否允许不安全的HTTPS连接
+    enabled: false            # 是否启用全局代理
+    default: ""               # 默认代理，留空则不使用。会被服务特定代理覆盖
+    allow_insecure: true      # 是否允许不安全的HTTPS连接
   
   # 重试配置
   max_retries: 3
-  default_timeout: 300
+  default_timeout: 600
   
   # 需要重试的错误码
   error_codes:
@@ -76,12 +79,12 @@ global:
   
   # 日志配置
   log:
-    level: "info"      # debug, info, warn, error
-    format: "json"     # text, json
-    output: "file"     # console, file
+    level: "info"      # 可选：debug, info, warn, error
+    format: "json"     # 可选：text, json
+    output: "file"     # 可选：console, file
     file_path: "./logs/deepai.log"
     debug:
-      enabled: true    # 是否启用调试日志
+      enabled: true         # 是否启用调试日志
       print_request: true   # 打印请求内容
       print_response: true  # 打印响应内容
       max_content_length: 1000  # 内容打印最大长度，避免日志过大
