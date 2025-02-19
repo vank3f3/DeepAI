@@ -188,7 +188,6 @@ func (l *RequestLogger) LogContent(contentType string, content interface{}, maxL
 	l.Log("%s Content:\n%s", contentType, truncatedContent)
 }
 
-// 工具函数
 func truncateContent(content string, maxLength int) string {
 	if len(content) <= maxLength {
 		return content
@@ -237,7 +236,6 @@ type Server struct {
 	srv    *http.Server
 }
 
-// 全局互斥锁及随机数生成器（用于加权随机选择）
 var (
 	randMu  sync.Mutex
 	randGen = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -276,9 +274,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 }
 
-// handleOpenAIRequests 统一处理 /v1/chat/completions 和 /v1/models
 func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
-	// 根据 URL 判断方法
 	if r.Method != http.MethodPost && r.URL.Path == "/v1/chat/completions" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -289,7 +285,6 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger := NewRequestLogger(s.config)
-
 	fullAPIKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	apiKey := extractRealAPIKey(fullAPIKey)
 	channelID := extractChannelID(fullAPIKey)
@@ -304,7 +299,6 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// /v1/models 请求直接转发
 	if r.URL.Path == "/v1/models" {
 		req := &ChatCompletionRequest{
 			APIKey: apiKey,
@@ -314,7 +308,6 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 处理 /v1/chat/completions 请求
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		logger.Log("Error reading request body: %v", err)
@@ -335,11 +328,9 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 	}
 	req.APIKey = apiKey
 
-	// 加权随机选择一个思考服务
 	thinkingService := s.getWeightedRandomThinkingService()
 	logger.Log("Using thinking service: %s with API Key: %s", thinkingService.Name, logAPIKey(thinkingService.APIKey))
 
-	// 如果是 Stream 模式，需要先走思考服务流式输出，再拼装请求给最终 Channel
 	if req.Stream {
 		handler, err := NewStreamHandler(w, thinkingService, targetChannel, s.config)
 		if err != nil {
@@ -352,7 +343,6 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 非 Stream 模式，先调用思考服务获取思考链，再将思考链组装到最终请求中，转发给 Channel
 	thinkingResp, err := s.processThinkingContent(r.Context(), &req, thinkingService)
 	if err != nil {
 		logger.Log("Error processing thinking content: %v", err)
@@ -396,7 +386,6 @@ type ThinkingResponse struct {
 	ReasoningContent string
 }
 
-// processThinkingContent 先调用“思考服务”获取思考链，或者获取部分 reasoning
 func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletionRequest, thinkingService ThinkingService) (*ThinkingResponse, error) {
 	logger := NewRequestLogger(s.config)
 	log.Printf("Getting thinking content from service: %s (Mode: %s)", thinkingService.Name, thinkingService.Mode)
@@ -406,7 +395,6 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 	thinkingReq.Model = thinkingService.Model
 	thinkingReq.APIKey = thinkingService.APIKey
 
-	// 根据 mode 构造一个 system 提示
 	var thinkingPrompt ChatCompletionMessage
 	if thinkingService.Mode == "full" {
 		thinkingPrompt = ChatCompletionMessage{
@@ -483,11 +471,9 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 
 	result := &ThinkingResponse{}
 	if thinkingService.Mode == "full" {
-		// 全量模式：将整个 content 作为 reasoning，且不返回具体内容给用户
 		result.ReasoningContent = thinkingResp.Choices[0].Message.Content
 		result.Content = "Based on the above detailed analysis."
 	} else {
-		// 标准模式：如果有 reasoning_content 字段则使用，否则直接使用 content
 		result.Content = thinkingResp.Choices[0].Message.Content
 		if thinkingResp.Choices[0].Message.ReasoningContent != nil {
 			switch v := thinkingResp.Choices[0].Message.ReasoningContent.(type) {
@@ -503,7 +489,6 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 				log.Printf("Warning: Unexpected reasoning_content type: %T", v)
 			}
 		}
-		// 若仍为空，则 fallback
 		if result.ReasoningContent == "" {
 			result.ReasoningContent = result.Content
 			result.Content = "Based on the above reasoning."
@@ -516,7 +501,6 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 	return result, nil
 }
 
-// prepareEnhancedRequest 将思考链注入到最终请求
 func (s *Server) prepareEnhancedRequest(originalReq *ChatCompletionRequest, thinkingResp *ThinkingResponse, thinkingService ThinkingService) *ChatCompletionRequest {
 	logger := NewRequestLogger(s.config)
 	enhancedReq := *originalReq
@@ -551,7 +535,6 @@ Please provide a response that incorporates this analysis while maintaining natu
 	return &enhancedReq
 }
 
-// forwardRequest 将最终请求（包含思考链注入后的 Prompt）转发给目标 Channel
 func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req *ChatCompletionRequest, targetChannel Channel) {
 	logger := NewRequestLogger(s.config)
 
@@ -603,10 +586,8 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
 		return
 	}
 
-	// 在非流式情况下，可能目标也会返回 reasoning_content，为了安全起见，这里也做一次过滤
 	filteredBody, err := filterReasoningContent(respBody)
 	if err != nil {
-		// 如果解析失败，就直接透传原始数据；或根据需求进行处理
 		log.Printf("Warning: failed to filter reasoning content: %v", err)
 		filteredBody = respBody
 	}
@@ -630,7 +611,6 @@ func (s *Server) forwardRequest(w http.ResponseWriter, ctx context.Context, req 
 	w.Write(filteredBody)
 }
 
-// forwardModelsRequest 转发 /v1/models 请求
 func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context, req *ChatCompletionRequest, targetChannel Channel) {
 	logger := NewRequestLogger(s.config)
 
@@ -703,7 +683,6 @@ func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context
 
 // ---------------------- 流式处理 ----------------------
 
-// ThinkingStreamCollector 用于收集和处理思考链的流式输出
 type ThinkingStreamCollector struct {
 	buffer    strings.Builder
 	mu        sync.Mutex
@@ -734,7 +713,6 @@ func (tc *ThinkingStreamCollector) IsCompleted() bool {
 	return tc.completed
 }
 
-// StreamHandler 处理流式请求
 type StreamHandler struct {
 	thinkingService ThinkingService
 	targetChannel   Channel
@@ -757,7 +735,6 @@ func NewStreamHandler(w http.ResponseWriter, thinkingService ThinkingService, ta
 	}, nil
 }
 
-// HandleRequest 流式模式下的处理入口
 func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRequest) error {
 	logger := NewRequestLogger(h.config)
 	h.writer.Header().Set("Content-Type", "text/event-stream")
@@ -776,18 +753,16 @@ func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRe
 		return fmt.Errorf("thinking stream incomplete")
 	}
 
-	// 组装新的请求，发给目标Channel进行真正面向用户的回答
+	// 组装新的请求，发给目标 Channel，最终只将目标返回的结果流式返回给用户
 	finalReq := h.prepareFinalRequest(req, thinkingContent)
 	return h.streamFinalResponse(ctx, finalReq, logger)
 }
 
-// streamThinking 从“思考服务”获取推理内容，但不把 reasoning_content 直接给用户
 func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionRequest, collector *ThinkingStreamCollector, logger *RequestLogger) (string, error) {
 	thinkingReq := *req
 	thinkingReq.Model = h.thinkingService.Model
 	thinkingReq.APIKey = h.thinkingService.APIKey
 
-	// 根据模式构造 system 提示
 	var systemPrompt string
 	if h.thinkingService.Mode == "full" {
 		systemPrompt = "Provide a detailed step-by-step analysis of the question. Your entire response will be used as reasoning and won't be shown to the user directly."
@@ -893,37 +868,24 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 			continue
 		}
 
-		// 不管是 full 还是 standard，统统不把 reasoning_content 直接写给用户
-		// 只收集 content 和 reasoning_content 到 reasoningContent 里（本地存储）
 		if len(streamResp.Choices) > 0 {
 			choice := streamResp.Choices[0]
-			// 收集 reasoning_content
+			// 收集 reasoning_content（不直接返回给用户）
 			if choice.Delta.ReasoningContent != "" {
 				reasoningContent.WriteString(choice.Delta.ReasoningContent)
 				_, _ = collector.Write([]byte(choice.Delta.ReasoningContent))
 			}
-			// 收集 content
+			// 收集 content（full 模式下作为思考内容；standard 模式下同样只做收集）
 			if choice.Delta.Content != "" {
-				if h.thinkingService.Mode == "full" {
-					// full 模式下，思考服务的内容就是纯思考，不想全部给用户
-					// 所以只收集到 reasoningContent，并不返回给用户
-					reasoningContent.WriteString(choice.Delta.Content)
-					_, _ = collector.Write([]byte(choice.Delta.Content))
-				} else {
-					// standard 模式下，思考服务返回的 content 可能也包含一部分思路
-					// 但同样我们不直接输出给用户，这里依旧先保存在 reasoningContent
-					reasoningContent.WriteString(choice.Delta.Content)
-					_, _ = collector.Write([]byte(choice.Delta.Content))
-				}
+				reasoningContent.WriteString(choice.Delta.Content)
+				_, _ = collector.Write([]byte(choice.Delta.Content))
 			}
 
-			// 下面构造 SSE 返回给前端：我们把 reasoning_content 去掉，只返回空或保留 delta.Content
-			// 如果你想在「standard」模式下把一部分内容给用户，也可以在这里加逻辑区分
+			// 构造 SSE 返回给前端时，只返回 delta 中的 content（不包含 reasoning_content）
 			sseData := map[string]interface{}{
 				"choices": []map[string]interface{}{
 					{
 						"delta": map[string]interface{}{
-							// 一律只返回 content（若你希望隐藏，content也可以置为空）
 							"content": choice.Delta.Content,
 						},
 						"finish_reason": choice.FinishReason,
@@ -946,11 +908,9 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 			}
 		}
 	}
-
 	return reasoningContent.String(), nil
 }
 
-// streamFinalResponse 把真正的请求发往 targetChannel，并进行流式转发给用户
 func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatCompletionRequest, logger *RequestLogger) error {
 	if h.config.Global.Log.Debug.PrintRequest {
 		logger.LogContent("Final Stream Request", req, h.config.Global.Log.Debug.MaxContentLength)
@@ -1020,9 +980,7 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
 		}
 		lastProcessedLine = data
 
-		// 如果后端返回里还有 reasoning_content，也要进行过滤；这里可以简单做一次 JSON 检查，然后去掉 reasoning_content
 		cleanData := removeReasoningContentFromStream(data)
-
 		sseResponse := fmt.Sprintf("data: %s\n\n", cleanData)
 		h.writer.Write([]byte(sseResponse))
 		h.flusher.Flush()
@@ -1035,7 +993,6 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, req *ChatComple
 	return nil
 }
 
-// prepareFinalRequest 将收集到的思考链（thinkingContent）注入到一个 system 提示中，再发送给最终的 LLM
 func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest, thinkingContent string) *ChatCompletionRequest {
 	finalReq := *originalReq
 
@@ -1058,38 +1015,6 @@ func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest, 
 	}}, finalReq.Messages...)
 
 	return &finalReq
-}
-
-// removeReasoningContentFromStream 简单去除 streaming 数据中的 reasoning_content
-func removeReasoningContentFromStream(data string) string {
-	// 尝试解析为 JSON
-	var jsonMap map[string]interface{}
-	if err := json.Unmarshal([]byte(data), &jsonMap); err != nil {
-		// 解析失败则原样返回
-		return data
-	}
-
-	// 如果是一个流式结构 {"choices":[{"delta":{...}}]}
-	choicesRaw, ok := jsonMap["choices"].([]interface{})
-	if ok && len(choicesRaw) > 0 {
-		for _, c := range choicesRaw {
-			cMap, ok := c.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			delta, ok := cMap["delta"].(map[string]interface{})
-			if ok {
-				// 移除 reasoning_content 字段
-				delete(delta, "reasoning_content")
-			}
-		}
-	}
-
-	newData, err := json.Marshal(jsonMap)
-	if err != nil {
-		return data
-	}
-	return string(newData)
 }
 
 // ---------------------- HTTP Client 工具 ----------------------
@@ -1144,8 +1069,6 @@ func maskSensitiveHeaders(headers http.Header) http.Header {
 	return masked
 }
 
-// ---------------------- 校验辅助函数 ----------------------
-
 func isValidReasoningEffort(effort string) bool {
 	switch strings.ToLower(effort) {
 	case "low", "medium", "high":
@@ -1164,13 +1087,10 @@ func isValidReasoningFormat(format string) bool {
 	}
 }
 
-// ---------------------- 过滤 reasoning_content 的简易函数 ----------------------
-
-// filterReasoningContent 解析最终一次性返回的 JSON，并移除 reasoning_content
+// filterReasoningContent 解析最终返回的 JSON，并移除 reasoning_content 字段
 func filterReasoningContent(body []byte) ([]byte, error) {
 	var resp ChatCompletionResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		// 如果解析失败，可能目标不是一个 ChatCompletionResponse，直接返回错误给调用者
 		return nil, err
 	}
 	if len(resp.Choices) > 0 {
@@ -1179,6 +1099,32 @@ func filterReasoningContent(body []byte) ([]byte, error) {
 		}
 	}
 	return json.Marshal(resp)
+}
+
+// removeReasoningContentFromStream 去除流式响应中的 reasoning_content
+func removeReasoningContentFromStream(data string) string {
+	var jsonMap map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &jsonMap); err != nil {
+		return data
+	}
+	choicesRaw, ok := jsonMap["choices"].([]interface{})
+	if ok && len(choicesRaw) > 0 {
+		for _, c := range choicesRaw {
+			cMap, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			delta, ok := cMap["delta"].(map[string]interface{})
+			if ok {
+				delete(delta, "reasoning_content")
+			}
+		}
+	}
+	newData, err := json.Marshal(jsonMap)
+	if err != nil {
+		return data
+	}
+	return string(newData)
 }
 
 // ---------------------- 配置加载与验证 ----------------------
@@ -1273,10 +1219,7 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
-// ---------------------- main ----------------------
-
 func main() {
-	// 设置日志格式（包含日期、时间、微秒、文件和行号）
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
 
 	config, err := loadConfig()
@@ -1287,7 +1230,6 @@ func main() {
 
 	server := NewServer(config)
 
-	// 优雅关闭处理
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
