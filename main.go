@@ -46,10 +46,10 @@ type ThinkingService struct {
 	Retry           int      `mapstructure:"retry"`
 	Weight          int      `mapstructure:"weight"`
 	Proxy           string   `mapstructure:"proxy"`
-	Mode            string   `mapstructure:"mode"` // 支持 "standard"（标准）和 "full"（全量）
+	Mode            string   `mapstructure:"mode"` // "standard"（标准）或 "full"（全量）
 	ReasoningEffort string   `mapstructure:"reasoning_effort"` // 可选："low"、"medium"、"high"
 	ReasoningFormat string   `mapstructure:"reasoning_format"` // 可选："parsed"、"raw"、"hidden"
-	Temperature     *float64 `mapstructure:"temperature"`      // 若未配置，则使用默认 0.7
+	Temperature     *float64 `mapstructure:"temperature"`      // 默认 0.7
 }
 
 func (s *ThinkingService) GetFullURL() string {
@@ -188,7 +188,6 @@ func (l *RequestLogger) LogContent(contentType string, content interface{}, maxL
 	l.Log("%s Content:\n%s", contentType, truncatedContent)
 }
 
-// 工具函数
 func truncateContent(content string, maxLength int) string {
 	if len(content) <= maxLength {
 		return content
@@ -404,7 +403,7 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 
 	var thinkingPrompt ChatCompletionMessage
 	if thinkingService.Mode == "full" {
-		// 全量模式：将整个响应内容作为思考链，不直接返回给用户
+		// 全量模式：整个响应作为思考链，最终返回占位提示
 		thinkingPrompt = ChatCompletionMessage{
 			Role:    "system",
 			Content: "Provide a detailed step-by-step analysis of the question. Your entire response will be used as reasoning and won't be shown to the user directly.",
@@ -418,7 +417,6 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 	}
 	thinkingReq.Messages = append([]ChatCompletionMessage{thinkingPrompt}, thinkingReq.Messages...)
 
-	// 构造发送给思考服务的 payload，添加自定义参数
 	temperature := 0.7
 	if thinkingService.Temperature != nil {
 		temperature = *thinkingService.Temperature
@@ -481,11 +479,11 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 
 	result := &ThinkingResponse{}
 	if thinkingService.Mode == "full" {
-		// 全量模式：将整个 content 作为 reasoning，且不返回具体内容给用户
+		// 全量模式：将整个 content 作为 reasoning，返回占位内容给用户
 		result.ReasoningContent = thinkingResp.Choices[0].Message.Content
 		result.Content = "Based on the above detailed analysis."
 	} else {
-		// 标准模式：采用响应中的 reasoning_content
+		// 标准模式：采用响应中的 reasoning_content（如果为空，则退化处理）
 		result.Content = thinkingResp.Choices[0].Message.Content
 		if thinkingResp.Choices[0].Message.ReasoningContent != nil {
 			switch v := thinkingResp.Choices[0].Message.ReasoningContent.(type) {
@@ -501,7 +499,6 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 				log.Printf("Warning: Unexpected reasoning_content type: %T", v)
 			}
 		}
-		// 如果 reasoning_content 为空，则退化处理
 		if result.ReasoningContent == "" {
 			result.ReasoningContent = result.Content
 			result.Content = "Based on the above reasoning."
@@ -723,13 +720,14 @@ func NewStreamHandler(w http.ResponseWriter, thinkingService ThinkingService, ta
 
 func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRequest) error {
 	logger := NewRequestLogger(h.config)
+	// 设置 SSE 响应头（注意：这里不会把思考服务的内容直接写给用户）
 	h.writer.Header().Set("Content-Type", "text/event-stream")
 	h.writer.Header().Set("Cache-Control", "no-cache")
 	h.writer.Header().Set("Connection", "keep-alive")
 
 	collector := &ThinkingStreamCollector{}
 
-	// 先从思考服务获取流式推理内容
+	// 从思考服务获取流式推理内容，但不将中间结果返回给客户端
 	thinkingContent, err := h.streamThinking(ctx, req, collector, logger)
 	if err != nil {
 		return fmt.Errorf("thinking stream error: %v", err)
@@ -739,7 +737,7 @@ func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRe
 		return fmt.Errorf("thinking stream incomplete")
 	}
 
-	// 拿到思考内容后构造最终请求，继续流式返回
+	// 拿到思考内容后构造最终请求，最终只将目标渠道返回的结果流式返回给用户
 	finalReq := h.prepareFinalRequest(req, thinkingContent)
 	return h.streamFinalResponse(ctx, finalReq, logger)
 }
@@ -808,7 +806,6 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 
 	reader := bufio.NewReader(resp.Body)
 	var reasoningContent strings.Builder
-	var lastLine string
 
 	for {
 		select {
@@ -825,15 +822,12 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 		}
 
 		line = strings.TrimSpace(line)
-		if line == "" || line == lastLine {
+		if line == "" {
 			continue
 		}
-		lastLine = line
-
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			collector.SetCompleted()
@@ -862,31 +856,11 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 					collector.Write([]byte(choice.Delta.Content))
 				}
 			} else {
+				// 仅收集 reasoning_content，忽略 content（防止思考内容溢出）
 				if choice.Delta.ReasoningContent != "" {
 					reasoningContent.WriteString(choice.Delta.ReasoningContent)
 					collector.Write([]byte(choice.Delta.ReasoningContent))
 				}
-				if choice.Delta.Content != "" {
-					collector.Write([]byte(choice.Delta.Content))
-				}
-			}
-			sseData := map[string]interface{}{
-				"choices": []map[string]interface{}{
-					{
-						"delta": map[string]interface{}{
-							"content":           choice.Delta.Content,
-							"reasoning_content": choice.Delta.ReasoningContent,
-						},
-						"finish_reason": choice.FinishReason,
-					},
-				},
-			}
-			sseBytes, _ := json.Marshal(sseData)
-			sseResponse := fmt.Sprintf("data: %s\n\n", string(sseBytes))
-			h.writer.Write([]byte(sseResponse))
-			h.flusher.Flush()
-			if h.config.Global.Log.Debug.PrintResponse {
-				logger.LogContent("Thinking Stream Chunk", streamResp, h.config.Global.Log.Debug.MaxContentLength)
 			}
 			if choice.FinishReason != nil {
 				collector.SetCompleted()
@@ -894,7 +868,6 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 			}
 		}
 	}
-
 	return reasoningContent.String(), nil
 }
 
@@ -1042,7 +1015,6 @@ func maskSensitiveHeaders(headers http.Header) http.Header {
 
 // ---------------------- 校验辅助函数 ----------------------
 
-// 判断 reasoning_effort 是否合法
 func isValidReasoningEffort(effort string) bool {
 	switch strings.ToLower(effort) {
 	case "low", "medium", "high":
@@ -1052,7 +1024,6 @@ func isValidReasoningEffort(effort string) bool {
 	}
 }
 
-// 判断 reasoning_format 是否合法
 func isValidReasoningFormat(format string) bool {
 	switch strings.ToLower(format) {
 	case "parsed", "raw", "hidden":
