@@ -36,6 +36,14 @@ type Config struct {
     Global           GlobalConfig            `mapstructure:"global"`
 }
 
+// ProxyConfig 代理配置
+type ProxyConfig struct {
+    Enabled       bool   `mapstructure:"enabled"`
+    Default       string `mapstructure:"default"`
+    AllowInsecure bool   `mapstructure:"allow_insecure"`
+}
+
+
 // ThinkingService 思考服务配置
 type ThinkingService struct {
     ID      int    `mapstructure:"id"`
