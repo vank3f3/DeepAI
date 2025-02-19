@@ -43,7 +43,6 @@ type ProxyConfig struct {
     AllowInsecure bool   `mapstructure:"allow_insecure"`
 }
 
-
 // ThinkingService 思考服务配置
 type ThinkingService struct {
     ID      int    `mapstructure:"id"`
@@ -102,7 +101,7 @@ type ThinkingConfig struct {
     Enabled          bool `mapstructure:"enabled"`
     AddToAllRequests bool `mapstructure:"add_to_all_requests"`
     Timeout          int  `mapstructure:"timeout"`
-    ChainPreProcess  bool `mapstructure:"chain_preprocess"` // 是否对思考链做预处理
+    ChainPreProcess  bool `mapstructure:"chain_preprocess"` // 可选：是否对思考链做预处理
 }
 
 // LogConfig 日志配置
@@ -257,10 +256,8 @@ type ThinkingResponse struct {
     IsStandardMode         bool   // 是否属于标准思考模型(有 reasoning_content)
 }
 
-// 对思考链做预处理
+// 对思考链做预处理（可选）
 func preprocessReasoningChain(chain string) string {
-    // 这里可以实现自定义的“思考链”文本清洗逻辑
-    // 示例：去掉一些多余标签、注释等
     lines := strings.Split(chain, "\n")
     var processed []string
     for _, ln := range lines {
@@ -268,7 +265,7 @@ func preprocessReasoningChain(chain string) string {
         if ln == "" {
             continue
         }
-        // 可根据需求过滤一些前缀
+        // 这里也可以过滤一些特定前缀
         if strings.HasPrefix(ln, "Note:") {
             continue
         }
@@ -385,9 +382,6 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
     // 分流：是否是 stream
     if userReq.Stream {
         // 流式处理
-        //   - 先流式地拿到思考链
-        //   - 根据是否标准思考模型，决定是否把 reasoning_content chunk 发给用户
-        //   - 再把思考链插入到最终请求，向后端模型再做流式请求
         handler, err := NewStreamHandler(w, thinkingSvc, ch, s.config, logger)
         if err != nil {
             http.Error(w, "Streaming not supported", http.StatusInternalServerError)
@@ -399,8 +393,6 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
         }
     } else {
         // 非流式处理
-        //   - 直接调用思考服务非流式拿到全部思考链
-        //   - 拼装后请求最终后端，非流式返回结果给用户
         tResp, err := s.callThinkingService(ctxWithTimeout(r.Context(), s.config.Global.Thinking.Timeout), &userReq, thinkingSvc, logger)
         if err != nil {
             logger.Log("Thinking service error: %v", err)
@@ -508,7 +500,6 @@ func (s *Server) callThinkingService(ctx context.Context, userReq *ChatCompletio
     thinkReq.Model = svc.Model
     thinkReq.APIKey = svc.APIKey
 
-    // 不再强行插入提示，让思考模型自己产出
     reqBody, _ := json.Marshal(thinkReq)
     if s.config.Global.Log.Debug.PrintRequest {
         logger.LogContent("Thinking Service Request (Non-Stream)", string(reqBody), s.config.Global.Log.Debug.MaxContentLength)
@@ -674,7 +665,7 @@ func (s *Server) forwardRequestNonStream(w http.ResponseWriter, finalReq *ChatCo
 // ========== 流式处理器 ==========
 
 // 1) 先流式思考服务 => 获取/或不获取 reasonChain
-// 2) 根据是否标准思考模型 + 用户场景，决定要不要把 reasoning_content 透传给用户
+// 2) 根据是否标准思考模型 + 用户需求，决定要不要把 reasoning_content 透传给用户
 // 3) 全部思考完毕后，再发起对后端channel的流式请求，把最终结果返回给用户
 
 type StreamHandler struct {
@@ -731,9 +722,7 @@ func (h *StreamHandler) Handle(ctx context.Context, userReq *ChatCompletionReque
     return h.streamFinalResponse(ctx, finalReq)
 }
 
-// streamThinking 负责向思考服务发起流式请求，
-// 1) 如果是标准模型(包含 reasoning_content)，则在 SSE 中把 chain 发送给用户(场景3);
-// 2) 如果是非标准模型，则不把 chain 发给用户(场景2)——只本地收集。
+// streamThinking 负责向思考服务发起流式请求
 func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatCompletionRequest) error {
     reqCopy := *userReq
     reqCopy.Stream = true
@@ -792,6 +781,7 @@ func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatComplet
         if line == "" {
             continue
         }
+        // 只解析 SSE 格式行
         if !strings.HasPrefix(line, "data: ") {
             continue
         }
@@ -822,24 +812,21 @@ func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatComplet
         rcPart := strings.TrimSpace(c.Delta.ReasoningContent)
         if rcPart != "" {
             h.isStdModel = true
-            // 如果需要预处理
             if h.config.Global.Thinking.ChainPreProcess {
                 rcPart = preprocessReasoningChain(rcPart)
             }
             // 收集 reasoningContent
             h.chainBuf.WriteString(rcPart)
         } else {
-            // 如果 reasoning_content 为空，可能是非标准 => 这时 content 全部就是思考链
+            // 如果 reasoning_content 为空，可能是非标准 => content 作为思考链
             if !h.isStdModel && c.Delta.Content != "" {
                 h.chainBuf.WriteString(c.Delta.Content)
             }
         }
 
-        // 是否要把思考链发给用户：
-        //   - 只有在“标准思考模型 + 流式(场景3)”才展示 chain
-        //   - isStdModel = true 才表示已经检测到 reasoning_content
+        // 如果是标准模型，且确实拿到了 reasoning_content，需要看情况是否要 SSE 给前端；
+        // 如果你希望“场景3：流式+标准”直接把 reasoning_content 发给用户，则在此发 chunk。
         if h.isStdModel && rcPart != "" {
-            // 把 reasoning_content 直接 SSE 发给用户
             sseObj := map[string]interface{}{
                 "choices": []map[string]interface{}{
                     {
@@ -854,9 +841,9 @@ func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatComplet
             _, _ = h.w.Write([]byte(sseLine))
             h.flusher.Flush()
         }
-        // 不把 content 发给用户——因为真正的回答要后端 LLM 来给
 
         if c.FinishReason != nil {
+            // 如果思考服务发了 finish_reason，则视为结束
             break
         }
     }
@@ -867,8 +854,6 @@ func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatComplet
 func (h *StreamHandler) prepareFinalRequest(userReq *ChatCompletionRequest, chain string) *ChatCompletionRequest {
     finalReq := *userReq
 
-    // 如果 isStdModel == false，则“思考链”就是 chainBuf 全部
-    // 如果是标准模型，则 chainBuf 收集到的就是 reasoning_content
     systemPrompt := fmt.Sprintf("Previous reasoning chain:\n%s\nPlease refine answer accordingly.", chain)
     finalReq.Messages = append([]ChatCompletionMessage{
         {Role: "system", Content: systemPrompt},
@@ -907,7 +892,7 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, finalReq *ChatC
     }
 
     reader := bufio.NewReader(resp.Body)
-    var lastLine string
+
     for {
         select {
         case <-ctx.Done():
@@ -930,18 +915,15 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, finalReq *ChatC
         }
         data := strings.TrimPrefix(line, "data: ")
         if data == "[DONE]" {
+            // 将 [DONE] 传给客户端
             h.w.Write([]byte("data: [DONE]\n\n"))
             h.flusher.Flush()
             break
         }
-        if data == lastLine {
-            continue
-        }
-        lastLine = data
 
-        // 转发 SSE
+        // 转发 SSE 给用户
         chunk := "data: " + data + "\n\n"
-        h.w.Write([]byte(chunk))
+        _, _ = h.w.Write([]byte(chunk))
         h.flusher.Flush()
     }
     return nil
