@@ -55,6 +55,7 @@ type ThinkingService struct {
 	Retry   int    `mapstructure:"retry"`
 	Weight  int    `mapstructure:"weight"`
 	Proxy   string `mapstructure:"proxy"`
+    Mode    string `mapstructure:"mode"` // 新增：思考模式 (auto, standard, nonstandard, guided)
 }
 
 func (s *ThinkingService) GetFullURL() string {
@@ -68,6 +69,12 @@ type Channel struct {
 	APIPath string `mapstructure:"api_path"`
 	Timeout int    `mapstructure:"timeout"`
 	Proxy   string `mapstructure:"proxy"`
+    Mode    string `mapstructure:"mode"`          // 新增：通道模式 (compatible, enhanced)
+    ModelConfig []ModelConfig `mapstructure:"model_config"` // 新增：模型特定配置
+}
+type ModelConfig struct {
+    ModelPattern string `mapstructure:"model_pattern"`
+    Mode         string `mapstructure:"mode"`
 }
 
 func (c *Channel) GetFullURL() string {
@@ -85,6 +92,7 @@ type GlobalConfig struct {
 	Server   ServerConfig   `mapstructure:"server"`
 	Proxy    ProxyConfig    `mapstructure:"proxy"`
 	Thinking ThinkingConfig `mapstructure:"thinking"`
+    Channel  ChannelConfig  `mapstructure:"channel"` // 新增：通道全局配置
 }
 
 // ServerConfig 服务器配置
@@ -98,10 +106,16 @@ type ServerConfig struct {
 
 // ThinkingConfig 思考链相关配置
 type ThinkingConfig struct {
-	Enabled          bool `mapstructure:"enabled"`
-	AddToAllRequests bool `mapstructure:"add_to_all_requests"`
-	Timeout          int  `mapstructure:"timeout"`
-	ChainPreProcess  bool `mapstructure:"chain_preprocess"` // 可选：是否对思考链做预处理
+	Enabled          bool   `mapstructure:"enabled"`
+	AddToAllRequests bool   `mapstructure:"add_to_all_requests"`
+	Timeout          int    `mapstructure:"timeout"`
+	ChainPreProcess  bool   `mapstructure:"chain_preprocess"` // 可选：是否对思考链做预处理
+    DefaultMode      string `mapstructure:"default_mode"`      // 新增：默认思考模式
+}
+
+// ChannelConfig 通道相关配置
+type ChannelConfig struct {
+    DefaultMode string `mapstructure:"default_mode"` // 新增：默认通道模式
 }
 
 // LogConfig 日志配置
@@ -274,6 +288,39 @@ func preprocessReasoningChain(chain string) string {
 	return strings.Join(processed, "\n")
 }
 
+// ============ 模式判断 ============
+func determineThinkingMode(svc ThinkingService, model string, config *Config) string {
+    // 1. 检查服务特定配置
+    if svc.Mode != "" && svc.Mode != "auto" {
+        return svc.Mode
+    }
+
+    // 2. 尝试自动识别 (简化逻辑，只区分标准和非标准)
+    if svc.Model!=""{ //如果配置了model
+        if strings.Contains(strings.ToLower(svc.Model), "deepseek-reasoner") {
+            return "standard"
+        }
+	}
+    // 3. 回退到全局默认
+    return config.Global.Thinking.DefaultMode
+}
+func determineChannelMode(ch Channel, model string, config *Config) string {
+    // 1. 检查模型特定配置
+    for _, mc := range ch.ModelConfig {
+        if matched, _ := regexp.MatchString(mc.ModelPattern, model); matched {
+            return mc.Mode
+        }
+    }
+
+    // 2. 检查通道级配置
+    if ch.Mode != "" {
+        return ch.Mode
+    }
+
+    // 3. 回退到全局默认
+    return config.Global.Channel.DefaultMode
+}
+
 // ============ 服务器主体 ============
 
 type Server struct {
@@ -321,7 +368,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // 核心处理入口
 func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
-    // 判定方法
+	// 判定方法
     if r.URL.Path == "/v1/chat/completions" && r.Method != http.MethodPost {
         http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
         return
@@ -393,16 +440,18 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// 非流式处理
-		tResp, err := s.callThinkingService(ctxWithTimeout(r.Context(), s.config.Global.Thinking.Timeout), &userReq, thinkingSvc, logger)
-		if err != nil {
-			logger.Log("Thinking service error: %v", err)
-			http.Error(w, "Thinking service error", http.StatusInternalServerError)
-			return
-		}
+        thinkingMode := determineThinkingMode(thinkingSvc, userReq.Model, s.config)
+        tResp, err := s.callThinkingService(ctxWithTimeout(r.Context(), s.config.Global.Thinking.Timeout), &userReq, thinkingSvc, thinkingMode, logger)
+        if err != nil {
+            logger.Log("Thinking service error: %v", err)
+            http.Error(w, "Thinking service error", http.StatusInternalServerError)
+            return
+        }
 
-		// 拼装对最终模型的请求
-		finalReq := s.prepareFinalRequest(&userReq, tResp, logger)
-		s.forwardRequestNonStream(w, finalReq, ch, logger)
+        // 拼装对最终模型的请求
+        finalReq := s.prepareFinalRequest(&userReq, tResp, thinkingMode, logger)
+        channelMode := determineChannelMode(ch, userReq.Model, s.config)
+        s.forwardRequestNonStream(w, finalReq, ch, channelMode, logger)
 	}
 }
 
@@ -493,12 +542,20 @@ func (s *Server) forwardModelsRequest(w http.ResponseWriter, ctx context.Context
 // ========== 非流式：调用思考服务 ==========
 
 func (s *Server) callThinkingService(ctx context.Context, userReq *ChatCompletionRequest,
-    svc ThinkingService, logger *RequestLogger) (*ThinkingResponse, error) {
+    svc ThinkingService, thinkingMode string, logger *RequestLogger) (*ThinkingResponse, error) {
 
     // 准备请求体
     thinkReq := *userReq
     thinkReq.Model = svc.Model
     thinkReq.APIKey = svc.APIKey
+    // 如果是 "guided" 模式，添加 system 消息
+    if thinkingMode == "guided" {
+        guidedPrompt := ChatCompletionMessage{
+            Role:    "system",
+            Content: "Please provide a detailed reasoning process for your response. Think step by step.",
+        }
+        thinkReq.Messages = append([]ChatCompletionMessage{guidedPrompt}, thinkReq.Messages...)
+    }
 
     reqBody, _ := json.Marshal(thinkReq)
     if s.config.Global.Log.Debug.PrintRequest {
@@ -546,32 +603,32 @@ func (s *Server) callThinkingService(ctx context.Context, userReq *ChatCompletio
         Content: ccr.Choices[0].Message.Content,
     }
 
-    // 判断是否有 reasoning_content
-    if ccr.Choices[0].Message.ReasoningContent != nil {
-        raw := ""
-        switch v := ccr.Choices[0].Message.ReasoningContent.(type) {
-        case string:
-            raw = strings.TrimSpace(v)
-        case map[string]interface{}:
-            if b, e := json.Marshal(v); e == nil {
-                raw = strings.TrimSpace(string(b))
+	// 根据 thinkingMode 处理
+    switch thinkingMode {
+    case "standard":
+        if ccr.Choices[0].Message.ReasoningContent != nil {
+            raw := ""
+            switch v := ccr.Choices[0].Message.ReasoningContent.(type) {
+            case string:
+                raw = strings.TrimSpace(v)
+            case map[string]interface{}:
+                if b, e := json.Marshal(v); e == nil {
+                    raw = strings.TrimSpace(string(b))
+                }
+            }
+            if raw != "" {
+                tResp.IsStandardMode = true
+                if s.config.Global.Thinking.ChainPreProcess {
+                    tResp.ActualReasoningContent = preprocessReasoningChain(raw)
+                } else {
+                    tResp.ActualReasoningContent = raw
+                }
+                tResp.ReasoningContent = raw // 仅留作调试
             }
         }
-        if raw != "" {
-            tResp.IsStandardMode = true
-            if s.config.Global.Thinking.ChainPreProcess {
-                tResp.ActualReasoningContent = preprocessReasoningChain(raw)
-            } else {
-                tResp.ActualReasoningContent = raw
-            }
-            tResp.ReasoningContent = raw // 仅留作调试
-        }
-    }
 
-    // 若是非标准 => 把 content 当成思考链
-    if !tResp.IsStandardMode {
-        tResp.ActualReasoningContent = tResp.Content
-        tResp.ReasoningContent = ""
+    case "nonstandard", "guided":
+        tResp.ActualReasoningContent = tResp.Content  //非标准模式，直接以返回的content作为思考链
     }
 
     return tResp, nil
@@ -579,18 +636,15 @@ func (s *Server) callThinkingService(ctx context.Context, userReq *ChatCompletio
 
 // ========== 拼装对最终模型的请求 ==========
 
-func (s *Server) prepareFinalRequest(userReq *ChatCompletionRequest, tResp *ThinkingResponse, logger *RequestLogger) *ChatCompletionRequest {
-	finalReq := *userReq
-
-    // 根据是否为标准模型来构建不同的提示
+func (s *Server) prepareFinalRequest(userReq *ChatCompletionRequest, tResp *ThinkingResponse, thinkingMode string, logger *RequestLogger) *ChatCompletionRequest {
+    finalReq := *userReq
     var systemPrompt string
-    if tResp.IsStandardMode {
-        systemPrompt = fmt.Sprintf("Previous reasoning chain:\n%s\nPlease refine answer accordingly.",
-            tResp.ActualReasoningContent)
+
+    // 根据 thinkingMode 和 tResp.IsStandardMode 构建提示
+    if thinkingMode == "standard" && tResp.IsStandardMode {
+        systemPrompt = fmt.Sprintf("Previous reasoning chain:\n%s\nPlease refine answer accordingly.", tResp.ActualReasoningContent)
     } else {
-        systemPrompt = fmt.Sprintf(`Based on the following reasoning process:
-%s
-Please provide the best answer accordingly.`, tResp.ActualReasoningContent)
+        systemPrompt = fmt.Sprintf("Reasoning process:\n%s\n\nPlease provide the best answer.", tResp.ActualReasoningContent)
     }
 
     finalReq.Messages = append([]ChatCompletionMessage{
@@ -600,13 +654,13 @@ Please provide the best answer accordingly.`, tResp.ActualReasoningContent)
     if s.config.Global.Log.Debug.PrintRequest {
         logger.LogContent("Enhanced Final Request", finalReq, s.config.Global.Log.Debug.MaxContentLength)
     }
-	return &finalReq
+    return &finalReq
 }
 
 // ========== 非流式 => 最终模型 ==========
 
 func (s *Server) forwardRequestNonStream(w http.ResponseWriter, finalReq *ChatCompletionRequest,
-	ch Channel, logger *RequestLogger) {
+    ch Channel, channelMode string, logger *RequestLogger) {
 
 	reqBody, _ := json.Marshal(finalReq)
     if s.config.Global.Log.Debug.PrintRequest {
@@ -663,19 +717,20 @@ func (s *Server) forwardRequestNonStream(w http.ResponseWriter, finalReq *ChatCo
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBytes)
 }
-
 // ========== 流式处理器 ==========
 
 type StreamHandler struct {
-	w               http.ResponseWriter
-	flusher         http.Flusher
-	thinkingSvc     ThinkingService
-	channel         Channel
-	config          *Config
-	logger          *RequestLogger
-	isStdModel      bool   // 是否标准思考模型
-	chainBuf        strings.Builder
-	thinkingComplete bool // 新增：思考过程是否已完整结束
+	w                http.ResponseWriter
+	flusher          http.Flusher
+	thinkingSvc      ThinkingService
+	channel          Channel
+	config           *Config
+	logger           *RequestLogger
+	isStdModel       bool   // 是否标准思考模型
+	chainBuf         strings.Builder
+	thinkingComplete bool     // 思考过程是否已完整结束
+    thinkingMode     string   // 思考模式
+    channelMode      string   // 通道模式
 }
 
 // NewStreamHandler 创建 StreamHandler
@@ -684,6 +739,9 @@ func NewStreamHandler(w http.ResponseWriter, tSvc ThinkingService, ch Channel, c
 	if !ok {
 		return nil, fmt.Errorf("streaming not supported")
 	}
+	thinkingMode := determineThinkingMode(tSvc, "", cfg) // 这里传入 "" 作为 model，因为此时还没有 userReq
+    channelMode := determineChannelMode(ch, "", cfg)    // 同上
+
 	return &StreamHandler{
 		w:           w,
 		flusher:     flusher,
@@ -692,6 +750,8 @@ func NewStreamHandler(w http.ResponseWriter, tSvc ThinkingService, ch Channel, c
 		config:      cfg,
 		logger:      logger,
         thinkingComplete: false,
+        thinkingMode: thinkingMode,
+        channelMode:  channelMode,
 	}, nil
 }
 
@@ -724,6 +784,14 @@ func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatComplet
 	reqCopy.Stream = true
 	reqCopy.Model = h.thinkingSvc.Model
 	reqCopy.APIKey = h.thinkingSvc.APIKey
+    // 如果是 "guided" 模式，添加 system 消息
+    if h.thinkingMode == "guided" {
+        guidedPrompt := ChatCompletionMessage{
+            Role:    "system",
+            Content: "Please provide a detailed reasoning process for your response. Think step by step.",
+        }
+        reqCopy.Messages = append([]ChatCompletionMessage{guidedPrompt}, reqCopy.Messages...)
+    }
 
 	bodyMap := map[string]interface{}{
 		"model":    reqCopy.Model,
@@ -812,40 +880,47 @@ func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatComplet
 		}
 		c := chunk.Choices[0]
 
-		// 处理 reasoning_content
-		if c.Delta.ReasoningContent != "" {
-			h.isStdModel = true // 标记为标准模型
-			rcPart := strings.TrimSpace(c.Delta.ReasoningContent)
-			if h.config.Global.Thinking.ChainPreProcess {
-				rcPart = preprocessReasoningChain(rcPart)
-			}
-			h.chainBuf.WriteString(rcPart) // 累积 reasoning_content
+        // 根据 thinkingMode 处理
+        switch h.thinkingMode {
+        case "standard":
+            // 处理 reasoning_content
+            if c.Delta.ReasoningContent != "" {
+                h.isStdModel = true // 标记为标准模型
+                rcPart := strings.TrimSpace(c.Delta.ReasoningContent)
+                if h.config.Global.Thinking.ChainPreProcess {
+                    rcPart = preprocessReasoningChain(rcPart)
+                }
+                h.chainBuf.WriteString(rcPart) // 累积 reasoning_content
 
-            contentBuffer.WriteString(rcPart)
+                contentBuffer.WriteString(rcPart)
 
-			// 实时发送 reasoning_content (类似 0.2.7 版本的行为)
-			sseObj := map[string]interface{}{
-				"choices": []map[string]interface{}{
-					{
-						"delta": map[string]string{
-							"reasoning_content": rcPart,
-						},
-					},
-				},
-			}
-			b, _ := json.Marshal(sseObj)
-			sseLine := "data: " + string(b) + "\n\n"
-			_, _ = h.w.Write([]byte(sseLine))
-			h.flusher.Flush()
-		}
+                // 实时发送 reasoning_content (类似 0.2.7 版本的行为)
+                sseObj := map[string]interface{}{
+                    "choices": []map[string]interface{}{
+                        {
+                            "delta": map[string]string{
+                                "reasoning_content": rcPart,
+                            },
+                        },
+                    },
+                }
+                b, _ := json.Marshal(sseObj)
+                sseLine := "data: " + string(b) + "\n\n"
+                _, _ = h.w.Write([]byte(sseLine))
+                h.flusher.Flush()
+            }
 
-        // 处理 content (无论是否标准模型)
-        if c.Delta.Content != "" {
-            contentBuffer.WriteString(c.Delta.Content) //累积content
-			if !h.isStdModel{
-				h.chainBuf.WriteString(c.Delta.Content)
-			}
+            // 处理 content (无论是否标准模型)
+            if c.Delta.Content != "" {
+                contentBuffer.WriteString(c.Delta.Content) //累积content
+            }
+        case "nonstandard","guided":
+            if c.Delta.Content != "" {
+                contentBuffer.WriteString(c.Delta.Content) //累积content
+                h.chainBuf.WriteString(c.Delta.Content)
+            }
         }
+
 
         // 如果有 finish_reason，则标记 content 已完整接收
         if c.FinishReason != nil {
@@ -854,7 +929,7 @@ func (h *StreamHandler) streamThinking(ctx context.Context, userReq *ChatComplet
 	}
 
     // 循环结束后，将累积的 content 写入 chainBuf (非标准模型)
-    if !h.isStdModel {
+    if h.thinkingMode == "nonstandard" || h.thinkingMode == "guided"{
         h.chainBuf.Reset()                 // 清空 chainBuf
         h.chainBuf.WriteString(contentBuffer.String()) // 写入累积的 content
     }
@@ -866,11 +941,12 @@ func (h *StreamHandler) prepareFinalRequest(userReq *ChatCompletionRequest) *Cha
     finalReq := *userReq
 
     var systemPrompt string
-    if h.isStdModel {
-        systemPrompt = fmt.Sprintf("Previous reasoningchain:\n%s\nPlease refine answer accordingly.", h.chainBuf.String())
+    if h.thinkingMode == "standard" && h.isStdModel {
+        systemPrompt = fmt.Sprintf("Previous reasoning chain:\n%s\nPlease refine answer accordingly.", h.chainBuf.String())
     } else {
         systemPrompt = fmt.Sprintf("Reasoning process:\n%s\n\nPlease provide the best answer.", h.chainBuf.String())
     }
+    
 
     finalReq.Messages = append([]ChatCompletionMessage{
         {Role: "system", Content: systemPrompt},
@@ -883,9 +959,9 @@ func (h *StreamHandler) prepareFinalRequest(userReq *ChatCompletionRequest) *Cha
     return &finalReq
 }
 
-// streamFinalResponse 向最终模型发起流式请求 (简化版)
+// streamFinalResponse 向最终模型发起流式请求 (最终改进版)
 func (h *StreamHandler) streamFinalResponse(ctx context.Context, finalReq *ChatCompletionRequest) error {
-    reqBody, _ := json.Marshal(finalReq)
+     reqBody, _ := json.Marshal(finalReq)
     if h.config.Global.Log.Debug.PrintRequest {
         h.logger.LogContent("Final Channel Stream Request", string(reqBody), h.config.Global.Log.Debug.MaxContentLength)
     }
@@ -913,43 +989,102 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, finalReq *ChatC
     }
 
     reader := bufio.NewReader(resp.Body)
-    timer := time.NewTimer(time.Duration(h.config.Global.DefaultTimeout) * time.Second)
+    timeoutDuration := time.Duration(h.config.Global.DefaultTimeout) * time.Second
+    timer := time.NewTimer(timeoutDuration)
     defer timer.Stop()
 
-    for {
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        case <-timer.C:
-            h.logger.Log("Timeout waiting for final response")
-            // 发送超时错误（SSE 格式）
-            errMsg := map[string]string{"error": "Timeout waiting for response from final model."}
-            errBytes, _ := json.Marshal(errMsg)
-            h.w.Write([]byte("data: " + string(errBytes) + "\n\n"))
-            h.flusher.Flush()
-            return fmt.Errorf("timeout waiting for final response")
-        default:
-        }
-
-        line, err := reader.ReadString('\n')
-        if err != nil {
-            if err == io.EOF {
-                break
+    // 根据 channelMode 选择不同的处理方式
+    if h.channelMode == "compatible" {
+        // 兼容模式：直接转发
+        for {
+            select {
+            case <-ctx.Done():
+                return ctx.Err()
+            case <-timer.C:
+                h.logger.Log("Timeout waiting for final response")
+                return fmt.Errorf("timeout in compatible mode") // 兼容模式下，超时直接返回错误
+            default:
+                line, err := reader.ReadString('\n')
+                if err != nil {
+                    if err == io.EOF {
+                        break
+                    }
+                    return err
+                }
+                line = strings.TrimSpace(line)
+                if line == "" {
+                    continue
+                }
+                //  兼容模式下，直接转发，不做任何修改
+                h.w.Write([]byte(line+"\n"))
+                h.flusher.Flush()
+                timer.Reset(timeoutDuration) //重置计时器
             }
-            return err
-        }
-        line = strings.TrimSpace(line)
-        if line == "" {
-            continue
         }
 
-        // 直接转发，不做任何解析
-        if strings.HasPrefix(line, "data: ") || strings.HasPrefix(line, "data:") {
-            h.w.Write([]byte(line + "\n\n"))
+    } else {
+        // 增强模式：发送过渡消息、初始消息、处理超时
+        // 发送阶段转换信号 (仅在标准模型下)
+        if h.isStdModel {
+            transitionMsg := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\\n\\n[思考完成，准备生成回答]\\n\\n\"}}]}\n\n"
+            h.w.Write([]byte(transitionMsg))
             h.flusher.Flush()
+            time.Sleep(200 * time.Millisecond) // 稍微延迟，确保客户端能接收到
         }
-        timer.Reset(time.Duration(h.config.Global.DefaultTimeout) * time.Second) //重置计时器
+
+        // 发送初始信号，让客户端知道接下来是 assistant 的 content
+        startMsg := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"
+        h.w.Write([]byte(startMsg))
+        h.flusher.Flush()
+
+        receivedData := false
+
+        for {
+            select {
+            case <-ctx.Done():
+                return ctx.Err()
+            case <-timer.C:
+                if !receivedData {
+                    h.logger.Log("Timeout waiting for final response")
+                    // 超时且未收到任何数据，发送错误信息
+                    h.w.Write([]byte("data: {\"error\":\"Timeout waiting for response\"}\n\n"))
+                    h.w.Write([]byte("data: [DONE]\n\n")) // 确保客户端知道流结束
+                    h.flusher.Flush()
+                    return fmt.Errorf("timeout waiting for final response")
+                }
+                return nil // 已收到数据但超时，认为正常结束
+            default:
+                line, err := reader.ReadString('\n')
+                if err != nil {
+                    if err == io.EOF {
+                        break
+                    }
+                    return err
+                }
+                line = strings.TrimSpace(line)
+                if line == "" {
+                    continue
+                }
+
+                // 确保正确的 SSE 格式
+                if line == "data:[DONE]\n" || line == "data: [DONE]\n"{
+                    h.w.Write([]byte("data: [DONE]\n\n"))
+                } else {
+                    h.w.Write([]byte(line))
+                    if !strings.HasSuffix(line, "\n") {
+                    h.w.Write([]byte("\n"))
+                    }
+                    if !strings.HasSuffix(line, "\n\n") {
+                        h.w.Write([]byte("\n"))
+                    }
+                }
+                h.flusher.Flush()
+                receivedData = true
+                timer.Reset(timeoutDuration) // 重置计时器
+            }
+        }
     }
+
     return nil
 }
 
@@ -1049,6 +1184,13 @@ func loadConfig() (*Config, error) {
 	if err := validateConfig(&c); err != nil {
 		return nil, fmt.Errorf("config invalid: %w", err)
 	}
+    // 设置默认值（如果未在配置文件中指定）
+    if c.Global.Thinking.DefaultMode == "" {
+        c.Global.Thinking.DefaultMode = "auto"
+    }
+    if c.Global.Channel.DefaultMode == "" {
+        c.Global.Channel.DefaultMode = "compatible"
+    }
 
 	return &c, nil
 }
@@ -1060,7 +1202,21 @@ func validateConfig(c *Config) error {
 	if len(c.Channels) == 0 {
 		return fmt.Errorf("no channels configured")
 	}
-	// 可再做一些简单检查
+    for _, ts := range c.ThinkingServices {
+        if ts.Mode != "" && ts.Mode != "auto" && ts.Mode != "standard" && ts.Mode != "nonstandard" && ts.Mode != "guided" {
+            return fmt.Errorf("invalid thinking service mode: %s", ts.Mode)
+        }
+    }
+    for _, ch := range c.Channels {
+        if ch.Mode != "" && ch.Mode != "compatible" && ch.Mode != "enhanced" {
+            return fmt.Errorf("invalid channel mode: %s", ch.Mode)
+        }
+        for _, mc := range ch.ModelConfig {
+            if mc.Mode != "compatible" && mc.Mode != "enhanced" {
+                return fmt.Errorf("invalid model config mode: %s", mc.Mode)
+            }
+        }
+    }
 	return nil
 }
 
