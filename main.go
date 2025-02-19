@@ -36,17 +36,20 @@ type Config struct {
 }
 
 type ThinkingService struct {
-	ID      int    `mapstructure:"id"`
-	Name    string `mapstructure:"name"`
-	Model   string `mapstructure:"model"`
-	BaseURL string `mapstructure:"base_url"`
-	APIPath string `mapstructure:"api_path"`
-	APIKey  string `mapstructure:"api_key"`
-	Timeout int    `mapstructure:"timeout"`
-	Retry   int    `mapstructure:"retry"`
-	Weight  int    `mapstructure:"weight"`
-	Proxy   string `mapstructure:"proxy"`
-	Mode    string `mapstructure:"mode"` // 新增：思考模式，支持 "standard"（标准）和 "full"（全量）
+	ID              int      `mapstructure:"id"`
+	Name            string   `mapstructure:"name"`
+	Model           string   `mapstructure:"model"`
+	BaseURL         string   `mapstructure:"base_url"`
+	APIPath         string   `mapstructure:"api_path"`
+	APIKey          string   `mapstructure:"api_key"`
+	Timeout         int      `mapstructure:"timeout"`
+	Retry           int      `mapstructure:"retry"`
+	Weight          int      `mapstructure:"weight"`
+	Proxy           string   `mapstructure:"proxy"`
+	Mode            string   `mapstructure:"mode"` // 支持 "standard"（标准）和 "full"（全量）
+	ReasoningEffort string   `mapstructure:"reasoning_effort"` // 可选："low"、"medium"、"high"
+	ReasoningFormat string   `mapstructure:"reasoning_format"` // 可选："parsed"、"raw"、"hidden"
+	Temperature     *float64 `mapstructure:"temperature"`      // 若未配置，则使用默认 0.7
 }
 
 func (s *ThinkingService) GetFullURL() string {
@@ -415,11 +418,29 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 	}
 	thinkingReq.Messages = append([]ChatCompletionMessage{thinkingPrompt}, thinkingReq.Messages...)
 
-	if s.config.Global.Log.Debug.PrintRequest {
-		logger.LogContent("Thinking Service Request", thinkingReq, s.config.Global.Log.Debug.MaxContentLength)
+	// 构造发送给思考服务的 payload，添加自定义参数
+	temperature := 0.7
+	if thinkingService.Temperature != nil {
+		temperature = *thinkingService.Temperature
+	}
+	payload := map[string]interface{}{
+		"model":       thinkingService.Model,
+		"messages":    thinkingReq.Messages,
+		"stream":      false,
+		"temperature": temperature,
+	}
+	if isValidReasoningEffort(thinkingService.ReasoningEffort) {
+		payload["reasoning_effort"] = thinkingService.ReasoningEffort
+	}
+	if isValidReasoningFormat(thinkingService.ReasoningFormat) {
+		payload["reasoning_format"] = thinkingService.ReasoningFormat
 	}
 
-	jsonData, err := json.Marshal(thinkingReq)
+	if s.config.Global.Log.Debug.PrintRequest {
+		logger.LogContent("Thinking Service Request", payload, s.config.Global.Log.Debug.MaxContentLength)
+	}
+
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal thinking request: %v", err)
 	}
@@ -725,7 +746,6 @@ func (h *StreamHandler) HandleRequest(ctx context.Context, req *ChatCompletionRe
 
 func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionRequest, collector *ThinkingStreamCollector, logger *RequestLogger) (string, error) {
 	thinkingReq := *req
-	thinkingReq.Stream = true
 	thinkingReq.Model = h.thinkingService.Model
 	thinkingReq.APIKey = h.thinkingService.APIKey
 
@@ -740,12 +760,21 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 		{Role: "system", Content: systemPrompt},
 	}, thinkingReq.Messages...)
 
+	temperature := 0.7
+	if h.thinkingService.Temperature != nil {
+		temperature = *h.thinkingService.Temperature
+	}
 	requestData := map[string]interface{}{
-		"model":           thinkingReq.Model,
-		"messages":        messages,
-		"stream":          true,
-		"reasoning_effort": "high",
-		"temperature":     0.7,
+		"model":       thinkingReq.Model,
+		"messages":    messages,
+		"stream":      true,
+		"temperature": temperature,
+	}
+	if isValidReasoningEffort(h.thinkingService.ReasoningEffort) {
+		requestData["reasoning_effort"] = h.thinkingService.ReasoningEffort
+	}
+	if isValidReasoningFormat(h.thinkingService.ReasoningFormat) {
+		requestData["reasoning_format"] = h.thinkingService.ReasoningFormat
 	}
 
 	jsonData, err := json.Marshal(requestData)
@@ -1009,6 +1038,28 @@ func maskSensitiveHeaders(headers http.Header) http.Header {
 		}
 	}
 	return masked
+}
+
+// ---------------------- 校验辅助函数 ----------------------
+
+// 判断 reasoning_effort 是否合法
+func isValidReasoningEffort(effort string) bool {
+	switch strings.ToLower(effort) {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
+}
+
+// 判断 reasoning_format 是否合法
+func isValidReasoningFormat(format string) bool {
+	switch strings.ToLower(format) {
+	case "parsed", "raw", "hidden":
+		return true
+	default:
+		return false
+	}
 }
 
 // ---------------------- 配置加载与验证 ----------------------
