@@ -885,71 +885,127 @@ func (h *StreamHandler) prepareFinalRequest(userReq *ChatCompletionRequest) *Cha
     return &finalReq
 }
 
-// streamFinalResponse 向最终模型发起流式请求
+// 对后端模型发起流式请求
 func (h *StreamHandler) streamFinalResponse(ctx context.Context, finalReq *ChatCompletionRequest) error {
-	reqBody, _ := json.Marshal(finalReq)
-	if h.config.Global.Log.Debug.PrintRequest {
-		h.logger.LogContent("Final Channel Stream Request", string(reqBody), h.config.Global.Log.Debug.MaxContentLength)
-	}
+    reqBody, _ := json.Marshal(finalReq)
+    if h.config.Global.Log.Debug.PrintRequest {
+        h.logger.LogContent("Final Channel Stream Request", string(reqBody), h.config.Global.Log.Debug.MaxContentLength)
+    }
 
-	client, err := createHTTPClient(h.channel.Proxy, time.Duration(h.channel.Timeout)*time.Second)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST", h.channel.GetFullURL(), bytes.NewBuffer(reqBody))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+finalReq.APIKey)
+    client, err := createHTTPClient(h.channel.Proxy, time.Duration(h.channel.Timeout)*time.Second)
+    if err != nil {
+        return err
+    }
+    req, err := http.NewRequestWithContext(ctx, "POST", h.channel.GetFullURL(), bytes.NewBuffer(reqBody))
+    if err != nil {
+        return err
+    }
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Authorization", "Bearer "+finalReq.APIKey)
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+    resp, err := client.Do(req)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("final channel status=%d, body=%s", resp.StatusCode, b)
-	}
+    if resp.StatusCode != http.StatusOK {
+        b, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("final channel status=%d, body=%s", resp.StatusCode, b)
+    }
 
-	reader := bufio.NewReader(resp.Body)
+    reader := bufio.NewReader(resp.Body)
+    receivedData := false // 标记是否收到过有效数据
+    timer := time.NewTimer(time.Duration(h.config.Global.DefaultTimeout) * time.Second) // 设置超时
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
+	defer timer.Stop()
+
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-timer.C:
+            if !receivedData {
+                h.logger.Log("Timeout waiting for final response")
+                // 返回自定义的错误信息（SSE 格式）
+                errMsg := map[string]string{"error": "Timeout waiting for response from final model."}
+                errBytes, _ := json.Marshal(errMsg)
+                h.w.Write([]byte("data: " + string(errBytes) + "\n\n"))
+                h.flusher.Flush()
+                return fmt.Errorf("timeout waiting for final response")
+            }
+            return nil // 超时，但已经收到过数据，则正常退出
+        default:
+        }
+        line, err := reader.ReadString('\n')
+        if err != nil {
+            if err == io.EOF {
+                break
+            }
+            return err
+        }
+        line = strings.TrimSpace(line)
+        if line == "" {
+            continue
+        }
+
+        // 不再强制要求 "data: " 开头
+        data := line
+        if strings.HasPrefix(line, "data: ") {
+            data = strings.TrimPrefix(line, "data: ")
+        }
+
+        if data == "[DONE]" {
+            h.w.Write([]byte("data: [DONE]\n\n"))
+            h.flusher.Flush()
+            break
+        }
+
+        // 尝试解析 JSON
+        var chunk map[string]interface{}
+        if jsonErr := json.Unmarshal([]byte(data), &chunk); jsonErr == nil {
+            // 检查是否有 "content" 字段 (或者 Cohere 对应的字段)
+            if content, ok := chunk["content"].(string); ok && content != "" {
+                // 构造 SSE 消息
+                sseData := fmt.Sprintf("data: %s\n\n", data) //直接发送data
+                h.w.Write([]byte(sseData))
+                h.flusher.Flush()
+                receivedData = true // 标记已收到有效数据
+                timer.Reset(time.Duration(h.config.Global.DefaultTimeout) * time.Second) //重设计时器
+            } else if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
+                // 如果是 choices 数组，尝试从中提取 content
+                if choice, ok := choices[0].(map[string]interface{}); ok {
+                    if delta, ok := choice["delta"].(map[string]interface{}); ok {
+                        if content, ok := delta["content"].(string); ok && content != "" {
+                            sseData := map[string]interface{}{
+                                "choices": []map[string]interface{}{
+                                    {
+                                        "delta": map[string]string{
+                                            "content": content,
+										},
+									},
+                                },
+                            }
+                            b, _ := json.Marshal(sseData)
+                            sseLine := "data: " + string(b) + "\n\n"
+                            _, _ = h.w.Write([]byte(sseLine))
+                            h.flusher.Flush()
+                            receivedData = true
+                            timer.Reset(time.Duration(h.config.Global.DefaultTimeout) * time.Second) //重设计时器
+                        }
+                    }
+                }
+            } else {
+                h.logger.Log("Received chunk but no content found: %s", line)
 			}
-			return err
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			// 将 [DONE] 传给客户端
-			h.w.Write([]byte("data: [DONE]\n\n"))
-			h.flusher.Flush()
-			break
-		}
-
-		// 转发 SSE 给用户
-		chunk := "data: " + data + "\n\n"
-		_, _ = h.w.Write([]byte(chunk))
-		h.flusher.Flush()
-	}
-	return nil
+        } else {
+            // 如果不是 JSON，也尝试直接发送（有些模型可能直接返回文本）
+            h.logger.Log("Failed to parse JSON, raw line: %s", line)
+            h.w.Write([]byte(data + "\n\n")) //直接发送原始数据
+            h.flusher.Flush()
+        }
+    }
+    return nil
 }
 
 // ========== 其他公共函数 ==========
