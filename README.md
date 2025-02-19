@@ -246,3 +246,6 @@ flowchart TD
     W --> X
 ```
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=BlueSkyXN/DeepAI&type=Date)](https://star-history.com/#BlueSkyXN/DeepAI&Date)
