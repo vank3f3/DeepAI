@@ -112,54 +112,110 @@ curl http://localhost:8080/v1/chat/completions \
 ## 系统架构
 
 ```mermaid
-graph TB
-    subgraph 客户端["客户端应用"]
-        A[OpenAI兼容应用]
+graph TD
+    A[主程序]
+    A1[加载配置]
+    A2[启动服务器]
+    A3[处理请求]
+    A4[思考服务交互]
+    A5[日志处理]
+    A6[关闭服务器]
+    
+    A --> A1
+    A --> A2
+    A --> A6
+    
+    A2 --> A3
+    A3 --> A4
+    A3 --> A5
+    
+    A4 --> A41[加权随机思考服务]
+    A41 --> A411[标准模式]
+    A41 --> A412[全量模式]
+    
+    A5 --> A51[请求日志]
+    A5 --> A52[响应日志]
+    
+    A6 --> A61[关闭流程]
+    
+    subgraph 思考服务
+        direction TB
+        A411[标准模式]
+        A412[全量模式]
     end
-
-    subgraph 代理服务器["DeepAI代理服务器"]
-        B[API网关]
-        C[密钥路由器]
-        D[请求处理器]
-        E[配置管理器]
-        F[负载均衡器]
+    subgraph 日志配置
+        direction LR
+        A51[请求日志]
+        A52[响应日志]
     end
+    
+    A1 -->|配置验证| A11[验证配置]
+    A2 -->|HTTP服务器处理| A21[启动HTTP服务器]
+    A3 -->|处理OpenAI请求| A31[处理聊天补全请求]
+    A3 -->|转发模型请求| A32[将请求转发到渠道]
+    A5 -->|调试| A53[打印请求和响应内容]
+```
 
-    subgraph 思考服务["思考服务集群"]
-        G[思考服务1]
-        H[思考服务2]
-        I[思考服务N]
-    end
 
-    subgraph 后端服务["LLM后端渠道"]
-        J[渠道1]
-        K[渠道2]
-        L[渠道N]
-    end
-
-    subgraph 配置系统["配置管理"]
-        M[config.yaml]
-    end
-
-    A -->|1.API请求:deep-channel-key| B
-    B -->|2.路由请求| C
-    C -->|3.提取渠道和密钥| D
-    D -->|4.获取配置| E
-    E -->|5.加载设置| M
-    D -->|6.选择服务| F
-    F -->|7.转发请求| 思考服务
-    G & H & I -->|8.生成推理过程| D
-    D -->|9.增强的请求| 后端服务
-    J & K & L -->|10.最终响应| D
-    D -->|11.流式/标准响应| B
-    B -->|12.OpenAI兼容响应| A
-
-    classDef primary fill:#2986cc,stroke:#1c5c91,color:white
-    classDef secondary fill:#93c47d,stroke:#6aa84f,color:white
-    classDef tertiary fill:#f6b26b,stroke:#e69138,color:white
-    classDef config fill:#c27ba0,stroke:#a64d79,color:white
-
-    class A,B,C,D,E,F primary
-    class G,H,I secondary
-    class J,K,L tertiary
-    class M config
+```mermaid
+flowchart TD
+    A[主程序入口]
+    B[加载配置文件\n（并验证配置）]
+    C[启动HTTP服务]
+    D[监听HTTP请求]
+    E[解析请求\n提取APIKey、ChannelID]
+    F[初始化日志记录]
+    G{请求类型判断}
+    H[/v1/models请求/]
+    I[/v1/chat/completions请求/]
+    J[直接转发请求到对应通道]
+    
+    %% 对话请求处理
+    K[判断是否启用流式处理]
+    L[非流式处理流程]
+    M[调用思考服务获取思考链]
+    N[构造System提示\n（根据标准/全量模式）]
+    O[处理思考服务响应\n（解析思考链）]
+    P[合并思考链与用户对话\n构造增强请求]
+    Q[转发增强请求到通道]
+    
+    %% 流式处理流程
+    R[流式处理流程]
+    S[启动StreamHandler]
+    T[实时接收思考链流数据]
+    U[实时将部分思考数据传给客户端]
+    V[构造最终合并请求]
+    W[流式转发最终请求到通道]
+    
+    X[响应结果返回给客户端]
+    
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G -- "/v1/models" --> H
+    G -- "/v1/chat/completions" --> I
+    H --> J
+    J --> X
+    
+    I --> K
+    K -- 非流式 --> L
+    K -- 流式 --> R
+    
+    %% 非流式处理分支
+    L --> M
+    M --> N
+    N --> O
+    O --> P
+    P --> Q
+    Q --> X
+    
+    %% 流式处理分支
+    R --> S
+    S --> T
+    T --> U
+    U --> V
+    V --> W
+    W --> X
