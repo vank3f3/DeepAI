@@ -110,7 +110,32 @@ curl http://localhost:8080/v1/chat/completions \
 
 
 ## 系统架构
+```mermaid
+sequenceDiagram
+    participant 客户端 as Client
+    participant 代理服务 as DeepAI Proxy
+    participant 思考服务 as Thinking Service
+    participant LLM后端 as LLM Backend
 
+    客户端->>代理服务: 发送 API 请求
+    Note over 代理服务: 提取 API Key 和渠道信息
+
+    alt 非流式处理
+        代理服务->>思考服务: 请求生成思考链（非流式）
+        Note over 思考服务: 使用内部思考模型生成详细思考链
+        思考服务-->>代理服务: 返回完整思考链内容
+    else 流式处理
+        代理服务->>思考服务: 发起流式思考链请求
+        Note over 思考服务: 实时生成并发送思考链数据
+        思考服务-->>代理服务: 流式返回部分思考链数据
+        Note over 代理服务: 累计并处理流式思考链数据
+    end
+
+    Note over 代理服务: 合并原始请求与思考链信息，构造增强请求
+    代理服务->>LLM后端: 发送增强后的请求
+    LLM后端-->>代理服务: 返回处理结果
+    代理服务-->>客户端: 返回最终响应
+```
 ```mermaid
 graph TD
     A[主程序]
@@ -219,3 +244,5 @@ flowchart TD
     U --> V
     V --> W
     W --> X
+```
+
