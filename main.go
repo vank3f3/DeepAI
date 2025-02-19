@@ -295,15 +295,42 @@ func determineThinkingMode(svc ThinkingService, model string, config *Config) st
         return svc.Mode
     }
 
-    // 2. 尝试自动识别 (简化逻辑，只区分标准和非标准)
-    if svc.Model!=""{ //如果配置了model
-        if strings.Contains(strings.ToLower(svc.Model), "deepseek-reasoner") {
-            return "standard"
-        }
-	}
+    // 2. 尝试自动识别 (恢复 0.3.x 的逻辑)
+    if isStandardThinkingResponse(svc) {
+        return "standard"
+    }
+
     // 3. 回退到全局默认
     return config.Global.Thinking.DefaultMode
 }
+
+// isStandardThinkingResponse 辅助函数：检查响应是否为标准思考模型格式
+func isStandardThinkingResponse(svc ThinkingService) bool {
+    // 创建一个临时的请求上下文和日志记录器 (这里不能用真实请求的上下文和日志)
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // 短暂超时
+    defer cancel()
+    logger := NewRequestLogger(&Config{}) // 临时的日志记录器
+
+
+    // 构造一个简单的测试请求
+    testReq := ChatCompletionRequest{
+        Model: svc.Model,
+        Messages: []ChatCompletionMessage{
+            {Role: "user", Content: "Placeholder question"},
+        },
+    }
+
+    // 调用 callThinkingService（非流式版本）
+    tResp, err := callThinkingService(ctx, &testReq, svc, "auto", logger) // 使用临时的 ctx 和 logger, 模式传入auto
+    if err != nil {
+        log.Printf("Error during thinking mode detection: %v", err)
+        return false // 无法确定，返回 false
+    }
+
+    // 判断返回的是不是标准模型
+    return tResp.IsStandardMode
+}
+
 func determineChannelMode(ch Channel, model string, config *Config) string {
     // 1. 检查模型特定配置
     for _, mc := range ch.ModelConfig {
@@ -1022,7 +1049,7 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, finalReq *ChatC
             }
         }
 
-    } else {
+    } else { //增强模式
         // 增强模式：发送过渡消息、初始消息、处理超时
         // 发送阶段转换信号 (仅在标准模型下)
         if h.isStdModel {
@@ -1072,7 +1099,7 @@ func (h *StreamHandler) streamFinalResponse(ctx context.Context, finalReq *ChatC
                 } else {
                     h.w.Write([]byte(line))
                     if !strings.HasSuffix(line, "\n") {
-                    h.w.Write([]byte("\n"))
+                      h.w.Write([]byte("\n"))
                     }
                     if !strings.HasSuffix(line, "\n\n") {
                         h.w.Write([]byte("\n"))
