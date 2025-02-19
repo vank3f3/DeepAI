@@ -45,6 +45,7 @@ type ThinkingService struct {
     Retry   int    `mapstructure:"retry"`
     Weight  int    `mapstructure:"weight"`
     Proxy   string `mapstructure:"proxy"`
+    Mode    string `mapstructure:"mode"` // 新增：思考模式，支持"standard"和"full"
 }
 
 func (s *ThinkingService) GetFullURL() string {
@@ -333,8 +334,8 @@ func (s *Server) handleOpenAIRequests(w http.ResponseWriter, r *http.Request) {
 
     // 根据权重随机选一个思考服务
     thinkingService := s.getWeightedRandomThinkingService()
-    logger.Log("Using thinking service: %s with API Key: %s",
-        thinkingService.Name, logAPIKey(thinkingService.APIKey))
+    logger.Log("Using thinking service: %s (Mode: %s) with API Key: %s",
+        thinkingService.Name, thinkingService.Mode, logAPIKey(thinkingService.APIKey))
 
     // 如果是流式请求
     if req.Stream {
@@ -389,11 +390,19 @@ func (s *Server) getWeightedRandomThinkingService() ThinkingService {
     for _, service := range thinkingServices {
         currentWeightSum += service.Weight
         if randNum < currentWeightSum {
+            // 如果没有设置模式，默认为标准模式
+            if service.Mode == "" {
+                service.Mode = "standard"
+            }
             return service
         }
     }
 
     log.Println("Warning: Fallback to first thinking service due to unexpected condition in weighted random selection.")
+    // 确保默认模式
+    if thinkingServices[0].Mode == "" {
+        thinkingServices[0].Mode = "standard"
+    }
     return thinkingServices[0]
 }
 
@@ -408,17 +417,33 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
 
     logger := NewRequestLogger(s.config)
 
-    log.Printf("Getting thinking content from service: %s", thinkingService.Name)
+    // 确保模式有效值
+    if thinkingService.Mode == "" {
+        thinkingService.Mode = "standard"
+    }
+
+    log.Printf("Getting thinking content from service: %s (Mode: %s)", 
+        thinkingService.Name, thinkingService.Mode)
     log.Printf("Using thinking service API Key: %s", logAPIKey(thinkingService.APIKey))
 
     thinkingReq := *req
     thinkingReq.Model = thinkingService.Model
     thinkingReq.APIKey = thinkingService.APIKey
 
-    thinkingPrompt := ChatCompletionMessage{
-        Role:    "system",
-        Content: "Please provide a detailed reasoning process for your response. Think step by step.",
+    // 根据模式设置不同的系统提示
+    var thinkingPrompt ChatCompletionMessage
+    if thinkingService.Mode == "full" {
+        thinkingPrompt = ChatCompletionMessage{
+            Role:    "system",
+            Content: "Provide a detailed step-by-step analysis of the question. Your entire response will be used as reasoning and won't be shown to the user directly.",
+        }
+    } else { // 标准模式
+        thinkingPrompt = ChatCompletionMessage{
+            Role:    "system",
+            Content: "Please provide a detailed reasoning process for your response. Think step by step.",
+        }
     }
+    
     thinkingReq.Messages = append([]ChatCompletionMessage{thinkingPrompt}, thinkingReq.Messages...)
 
     // 记录思考服务请求
@@ -478,31 +503,39 @@ func (s *Server) processThinkingContent(ctx context.Context, req *ChatCompletion
         return nil, fmt.Errorf("thinking service returned no choices")
     }
 
-    result := &ThinkingResponse{
-        Content: thinkingResp.Choices[0].Message.Content,
-    }
+    // 根据模式处理响应
+    result := &ThinkingResponse{}
+    if thinkingService.Mode == "full" {
+        // 全量模式：将整个content作为reasoning_content使用
+        result.ReasoningContent = thinkingResp.Choices[0].Message.Content
+        result.Content = "Based on the above detailed analysis." // 简单结论
+    } else {
+        // 标准模式：保持现有处理逻辑
+        result.Content = thinkingResp.Choices[0].Message.Content
 
-    if thinkingResp.Choices[0].Message.ReasoningContent != nil {
-        switch v := thinkingResp.Choices[0].Message.ReasoningContent.(type) {
-        case string:
-            result.ReasoningContent = v
-        case map[string]interface{}:
-            if jsonBytes, err := json.Marshal(v); err == nil {
-                result.ReasoningContent = string(jsonBytes)
-            } else {
-                log.Printf("Warning: Failed to marshal reasoning content: %v", err)
+        if thinkingResp.Choices[0].Message.ReasoningContent != nil {
+            switch v := thinkingResp.Choices[0].Message.ReasoningContent.(type) {
+            case string:
+                result.ReasoningContent = v
+            case map[string]interface{}:
+                if jsonBytes, err := json.Marshal(v); err == nil {
+                    result.ReasoningContent = string(jsonBytes)
+                } else {
+                    log.Printf("Warning: Failed to marshal reasoning content: %v", err)
+                }
+            default:
+                log.Printf("Warning: Unexpected reasoning_content type: %T", v)
             }
-        default:
-            log.Printf("Warning: Unexpected reasoning_content type: %T", v)
+        }
+
+        // 标准模式的后备处理
+        if result.ReasoningContent == "" {
+            result.ReasoningContent = result.Content
+            result.Content = "Based on the above reasoning."
         }
     }
 
-    if result.ReasoningContent == "" {
-        result.ReasoningContent = result.Content
-        result.Content = "Based on the above reasoning."
-    }
-
-    log.Printf("Processed thinking content:")
+    log.Printf("Processed thinking content (Mode: %s):", thinkingService.Mode)
     log.Printf("- Content length: %d", len(result.Content))
     log.Printf("- Reasoning content length: %d", len(result.ReasoningContent))
 
@@ -741,6 +774,11 @@ func NewStreamHandler(w http.ResponseWriter, thinkingService ThinkingService,
         return nil, fmt.Errorf("streaming not supported")
     }
 
+    // 确保模式有效值
+    if thinkingService.Mode == "" {
+        thinkingService.Mode = "standard"
+    }
+
     return &StreamHandler{
         thinkingService: thinkingService,
         targetChannel:   targetChannel,
@@ -782,11 +820,24 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
     thinkingReq.Model = h.thinkingService.Model
     thinkingReq.APIKey = h.thinkingService.APIKey
 
+    // 构建请求数据，根据模式调整
+    var systemPrompt string
+    if h.thinkingService.Mode == "full" {
+        systemPrompt = "Provide a detailed step-by-step analysis of the question. Your entire response will be used as reasoning and won't be shown to the user directly."
+    } else {
+        systemPrompt = "Please provide a detailed reasoning process for your response. Think step by step."
+    }
+    
+    // 添加system消息
+    messages := append([]ChatCompletionMessage{
+        {Role: "system", Content: systemPrompt},
+    }, thinkingReq.Messages...)
+
     requestData := map[string]interface{}{
         "model":            thinkingReq.Model,
-        "messages":         thinkingReq.Messages,
+        "messages":         messages,
         "stream":           true,
-        "reasoning_effort": "high",
+        "reasoning_effort": "high", // 对支持的模型
         "temperature":      0.7,
     }
 
@@ -811,7 +862,8 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
     request.Header.Set("Content-Type", "application/json")
     request.Header.Set("Authorization", "Bearer "+h.thinkingService.APIKey)
 
-    log.Printf("Starting thinking stream from: %s", h.thinkingService.GetFullURL())
+    log.Printf("Starting thinking stream from: %s (Mode: %s)", 
+        h.thinkingService.GetFullURL(), h.thinkingService.Mode)
 
     resp, err := client.Do(request)
     if err != nil {
@@ -877,16 +929,25 @@ func (h *StreamHandler) streamThinking(ctx context.Context, req *ChatCompletionR
 
         if len(streamResp.Choices) > 0 {
             choice := streamResp.Choices[0]
+            
+            // 根据不同模式处理流式内容
+            if h.thinkingService.Mode == "full" {
+                // 全量模式：只关注content字段
+                if choice.Delta.Content != "" {
+                    reasoningContent.WriteString(choice.Delta.Content)
+                    collector.Write([]byte(choice.Delta.Content))
+                }
+            } else {
+                // 标准模式：处理reasoning_content
+                if choice.Delta.ReasoningContent != "" {
+                    reasoningContent.WriteString(choice.Delta.ReasoningContent)
+                    collector.Write([]byte(choice.Delta.ReasoningContent))
+                }
 
-            // 处理 reasoning_content
-            if choice.Delta.ReasoningContent != "" {
-                reasoningContent.WriteString(choice.Delta.ReasoningContent)
-                collector.Write([]byte(choice.Delta.ReasoningContent))
-            }
-
-            // 处理普通 content
-            if choice.Delta.Content != "" {
-                collector.Write([]byte(choice.Delta.Content))
+                // 处理普通content
+                if choice.Delta.Content != "" {
+                    collector.Write([]byte(choice.Delta.Content))
+                }
             }
 
             // 转发 SSE 响应给客户端 (只转发本次 chunk 的数据)
@@ -1028,215 +1089,17 @@ func (h *StreamHandler) prepareFinalRequest(originalReq *ChatCompletionRequest,
     thinkingContent string) *ChatCompletionRequest {
     finalReq := *originalReq
 
-    thinkingMsg := ChatCompletionMessage{
-        Role:    "system",
-        Content: fmt.Sprintf("Previous thinking process:\n%s\nPlease consider the above thinking process in your response.",
-            thinkingContent),
-    }
-
-    finalReq.Messages = append([]ChatCompletionMessage{thinkingMsg}, finalReq.Messages...)
-    return &finalReq
-}
-
-// createHTTPClient 创建支持代理的HTTP客户端
-func createHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
-    transport := &http.Transport{
-        DialContext: (&net.Dialer{
-            Timeout:   30 * time.Second,
-            KeepAlive: 30 * time.Second,
-        }).DialContext,
-        ForceAttemptHTTP2:     true,
-        MaxIdleConns:          100,
-        IdleConnTimeout:       90 * time.Second,
-        TLSHandshakeTimeout:   10 * time.Second,
-        ExpectContinueTimeout: 1 * time.Second,
-    }
-
-    if proxyURL != "" {
-        parsedURL, err := url.Parse(proxyURL)
-        if err != nil {
-            return nil, fmt.Errorf("invalid proxy URL: %v", err)
-        }
-
-        switch parsedURL.Scheme {
-        case "http", "https":
-            transport.Proxy = http.ProxyURL(parsedURL)
-        case "socks5":
-            dialer, err := proxy.FromURL(parsedURL, proxy.Direct)
-            if err != nil {
-                return nil, fmt.Errorf("failed to create SOCKS5 dialer: %v", err)
-            }
-            transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-                return dialer.Dial(network, addr)
-            }
-        default:
-            return nil, fmt.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
-        }
-    }
-
-    return &http.Client{
-        Transport: transport,
-        Timeout:   timeout,
-    }, nil
-}
-
-// maskSensitiveHeaders 遮蔽敏感的header信息
-func maskSensitiveHeaders(headers http.Header) http.Header {
-    masked := make(http.Header)
-    for k, v := range headers {
-        if k == "Authorization" {
-            masked[k] = []string{"Bearer ****"}
-        } else {
-            masked[k] = v
-        }
-    }
-    return masked
-}
-
-// loadConfig 加载配置文件
-func loadConfig() (*Config, error) {
-    var configFile string
-    flag.StringVar(&configFile, "config", "", "path to config file")
-    flag.Parse()
-
-    viper.SetConfigType("yaml")
-
-    if configFile != "" {
-        viper.SetConfigFile(configFile)
+    var systemPrompt string
+    if h.thinkingService.Mode == "full" {
+        systemPrompt = fmt.Sprintf("Consider the following detailed analysis (not shown to user):\n%s\n\nProvide a clear, concise response that incorporates insights from this analysis while maintaining natural conversation flow.", thinkingContent)
     } else {
-        ex, err := os.Executable()
-        if err != nil {
-            return nil, err
-        }
-        exePath := filepath.Dir(ex)
-
-        defaultPaths := []string{
-            filepath.Join(exePath, "config.yaml"),
-            filepath.Join(exePath, "conf", "config.yaml"),
-            "./config.yaml",
-            "./conf/config.yaml",
-        }
-
-        if os.PathSeparator == '\\' {
-            programData := os.Getenv("PROGRAMDATA")
-            if programData != "" {
-                defaultPaths = append(defaultPaths, filepath.Join(programData, "DeepAI", "config.yaml"))
-            }
-        } else {
-            defaultPaths = append(defaultPaths, "/etc/deepai/config.yaml")
-        }
-
-        for _, path := range defaultPaths {
-            viper.AddConfigPath(filepath.Dir(path))
-            if strings.Contains(path, ".yaml") {
-                viper.SetConfigName(strings.TrimSuffix(filepath.Base(path), ".yaml"))
-            }
-        }
+        systemPrompt = fmt.Sprintf("Previous thinking process:\n%s\nPlease consider the above thinking process in your response.", thinkingContent)
     }
 
-    if err := viper.ReadInConfig(); err != nil {
-        return nil, fmt.Errorf("failed to read config file: %v", err)
-    }
-
-    var config Config
-    if err := viper.Unmarshal(&config); err != nil {
-        return nil, fmt.Errorf("failed to unmarshal config: %v", err)
-    }
-
-    if err := validateConfig(&config); err != nil {
-        return nil, fmt.Errorf("invalid configuration: %v", err)
-    }
-
-    return &config, nil
-}
-
-// validateConfig 验证配置是否有效
-func validateConfig(config *Config) error {
-    if len(config.ThinkingServices) == 0 {
-        return fmt.Errorf("no thinking services configured")
-    }
-
-    if len(config.Channels) == 0 {
-        return fmt.Errorf("no channels configured")
-    }
-
-    for _, service := range config.ThinkingServices {
-        if service.BaseURL == "" {
-            return fmt.Errorf("thinking service %s has no base URL", service.Name)
-        }
-        if service.APIKey == "" {
-            return fmt.Errorf("thinking service %s has no API key", service.Name)
-        }
-        if service.Timeout <= 0 {
-            return fmt.Errorf("thinking service %s has invalid timeout", service.Name)
-        }
-        if service.Model == "" {
-            return fmt.Errorf("thinking service %s has no model specified", service.Name)
-        }
-    }
-
-    for id, channel := range config.Channels {
-        if channel.BaseURL == "" {
-            return fmt.Errorf("channel %s has no base URL", id)
-        }
-        if channel.Timeout <= 0 {
-            return fmt.Errorf("channel %s has invalid timeout", id)
-        }
-    }
-
-    if config.Global.DefaultTimeout <= 0 {
-        return fmt.Errorf("invalid global default timeout")
-    }
-    if config.Global.Server.Port <= 0 {
-        return fmt.Errorf("invalid server port")
-    }
-
-    return nil
-}
-
-func main() {
-    // 设置日志格式 - 包含日期、时间（精确到微秒）、文件名和行号
-    log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-
-    // 不再在这里执行 rand.Seed(...)，而是使用上面的 randGen
-
-    // 加载配置文件
-    config, err := loadConfig()
-    if err != nil {
-        log.Fatalf("Failed to load config: %v", err)
-    }
-
-    // 输出使用的配置文件路径
-    log.Printf("Using config file: %s", viper.ConfigFileUsed())
-
-    // 创建服务器实例
-    server := NewServer(config)
-
-    // 处理优雅关闭
-    done := make(chan os.Signal, 1)
-    signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-
-    // 在后台启动服务器
-    go func() {
-        if err := server.Start(); err != nil && err != http.ErrServerClosed {
-            log.Fatalf("Failed to start server: %v", err)
-        }
-    }()
-
-    log.Printf("Server started successfully")
-
-    // 等待中断信号
-    <-done
-    log.Print("Server stopping...")
-
-    // 创建关闭超时上下文
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-
-    // 优雅关闭服务器
-    if err := server.Shutdown(ctx); err != nil {
-        log.Printf("Server forced to shutdown: %v", err)
-    }
-
-    log.Print("Server stopped")
+    finalReq.Messages = append([]ChatCompletionMessage{{
+        Role:    "system",
+        Content: systemPrompt,
+    }}, finalReq.Messages...)
+    
+    return &finalReq
 }
