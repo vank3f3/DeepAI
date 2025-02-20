@@ -13,6 +13,7 @@ thinking_services:
     reasoning_effort: "high"   # 新增：推理令牌数量，选项："low"、"medium"、"high"，也可不填，不列出，置为空
     reasoning_format: "parsed" # 新增：推理过程格式，选项："parsed"、"raw"、"hidden"，也可不填，不列出，置为空
     temperature: 0.8           # 新增：温度参数（覆盖默认值0.7），未设置，则使用默认0.7
+    force_stop_deep_thinking: false
 
   - id: 2
     name: "openai-thinking"
@@ -25,6 +26,7 @@ thinking_services:
     weight: 50
     proxy: "http://127.0.0.1:7890"  # HTTP代理示例
     reasoning_effort: "medium"   # 新增：推理令牌数量，选项："low"、"medium"、"high"
+    force_stop_deep_thinking: true
 
 # API通道配置
 channels:
