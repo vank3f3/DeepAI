@@ -46,7 +46,7 @@ DeepAI 是一个代理服务器，通过整合“思考链”过程来增强大�
 |---------------------------------|-----------------|-----------|
 | Qwen32b 蒸馏版                   | 蒸馏版           |  40 TPS   |
 | Llama70b 蒸馏版 (非特化)          | 蒸馏版           | 57 TPS    |
-| Llama70b 特化版 (Groq)            | 特化版           | 280 TPS   |
+| L[lama70b 特化版 (Groq) ](https://console.groq.com/docs/reasoning)           | 特化版           | 280 TPS   |
 | Llama70b 特化版 (SambaNova)       | 特化版           | 192 TPS   |
 | Llama70b 特化版 (Cerebras)        | 特化版           | 1508 TPS  |
 
@@ -71,7 +71,7 @@ DeepAI 是一个代理服务器，通过整合“思考链”过程来增强大�
 | o1                         | 75 TPS    |
 | gemini-2.0-flash           | 128 TPS   |
 | gemini-2.0-pro             | 168.9 TPS |
-| gemini-2.0-flash-thinking  | 225 TPS   |
+| [gemini-2.0-flash-thinking](https://ai.google.dev/gemini-api/docs/thinking?hl=zh-cn)  | 225 TPS   |
 
 > 从数据看，DeepSeek R1 和 V3 的TPS明显低于竞争对手。
 
