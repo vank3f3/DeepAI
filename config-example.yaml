@@ -54,7 +54,7 @@ global:
     debug:
       enabled: true       # 是否启用调试日志
       print_request: true # 打印请求内容
-      print_response: true# 打印响应内容
+      print_response: true # 打印响应内容
       max_content_length: 1000  # 内容打印最大长度，避免日志过大
 
   server:
