@@ -42,36 +42,37 @@ DeepAI 是一个代理服务器，通过整合“思考链”过程来增强大�
 
 **蒸馏版模型与特化版**
 
-| 模型名称                          | 类型              | TPS       |
-|---------------------------------|-----------------|-----------|
-| Qwen32b 蒸馏版                   | 蒸馏版           |  40 TPS   |
-| Llama70b 蒸馏版 (非特化)          | 蒸馏版           | 57 TPS    |
-| L[lama70b 特化版 (Groq) ](https://console.groq.com/docs/reasoning)           | 特化版           | 280 TPS   |
-| Llama70b 特化版 (SambaNova)       | 特化版           | 192 TPS   |
-| Llama70b 特化版 (Cerebras)        | 特化版           | 1508 TPS  |
+| 模型名称 | 类型 | TPS | 最快渠道TPS |
+|---------|------|-----|-------------|
+| Qwen32b 蒸馏版 | 蒸馏版 | 40 TPS | 42.66 |
+| Llama70b 蒸馏版 (非特化) | 蒸馏版 | 57 TPS | 84.23 |
+| [Llama70b 特化版 (Groq)](https://console.groq.com/docs/reasoning) | 特化版 | 280 TPS | - |
+| Llama70b 特化版 (SambaNova) | 特化版 | 192 TPS | - |
+| Llama70b 特化版 (Cerebras) | 特化版 | 1508 TPS | - |
+
 
 **DeepSeek系列**
 
-| 模型            | TPS    |
-|----------------|--------|
-| DeepSeek R1    | 24 TPS |
-| DeepSeek V3    | 17 TPS |
+| 模型 | TPS | 最快渠道TPS |
+|------|-----|-------------|
+| DeepSeek R1 | 24 TPS | 52.51 |
+| DeepSeek V3 | 17 TPS | 28.54 |
 
 **主要竞争对手模型**
 
-| 模型名称                      | TPS       |
-|----------------------------|-----------|
-| claude-3.5-sonnet          | 51 TPS    |
-| claude-3.5-haiku           | 53 TPS    |
-| grok-2                     | 62 TPS    |
-| command-r-plus             | 60.41 TPS |
-| command-r7b                | 154 TPS   |
-| gpt-4o                     | 98 TPS    |
-| o3-mini-high               | 119 TPS   |
-| o1                         | 75 TPS    |
-| gemini-2.0-flash           | 128 TPS   |
-| gemini-2.0-pro             | 168.9 TPS |
-| [gemini-2.0-flash-thinking](https://ai.google.dev/gemini-api/docs/thinking?hl=zh-cn)  | 225 TPS   |
+| 模型名称 | TPS | 最快渠道TPS |
+|----------|-----|-------------|
+| claude-3.5-sonnet | 51 TPS | 58.97 |
+| claude-3.5-haiku | 53 TPS | 56.29 |
+| grok-2 | 62 TPS | - |
+| command-r-plus | 60.41 TPS | - |
+| command-r7b | 154 TPS | - |
+| gpt-4o | 98 TPS | - |
+| o3-mini-high | 119 TPS | - |
+| o1 | 75 TPS | - |
+| gemini-2.0-flash | 128 TPS | 129.98 |
+| gemini-2.0-pro | 84.42 TPS | 90.45 |
+| [gemini-2.0-flash-thinking](https://ai.google.dev/gemini-api/docs/thinking?hl=zh-cn) | 225 TPS | - |
 
 > 从数据看，DeepSeek R1 和 V3 的TPS明显低于竞争对手。
 
