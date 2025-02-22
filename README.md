@@ -47,8 +47,9 @@ DeepAI 是一个代理服务器，通过整合“思考链”过程来增强大�
 | Qwen32b 蒸馏版 | 蒸馏版 | 40 TPS | 42.66 |
 | Llama70b 蒸馏版 (非特化) | 蒸馏版 | 57 TPS | 84.23 |
 | [Llama70b 特化版 (Groq)](https://console.groq.com/docs/reasoning) | 特化版 | 280 TPS | - |
-| Llama70b 特化版 (SambaNova) | 特化版 | 192 TPS | - |
-| Llama70b 特化版 (Cerebras) | 特化版 | 1508 TPS | - |
+| Llama70b 特化版 (Cerebras) | 特化版 | 192 TPS | - |
+| [Llama70b 特化版 (SambaNova)](https://sambanova.ai/press/fastest-deepseek-r1-671b-with-highest-efficiency) | 特化版 | 1508 TPS | - |
+
 
 
 **DeepSeek系列**
