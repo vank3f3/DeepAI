@@ -57,7 +57,7 @@ jobs:
         git config --global user.name "GitHub Actions"
         git tag -a ${NEW_VERSION} -m "Release ${NEW_VERSION}"
         # git push origin ${NEW_VERSION}
-        git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/vank3f3/sub-router.git ${NEW_VERSION}
+        git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/vank3f3/DeepAI.git ${NEW_VERSION}
       
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -74,8 +74,8 @@ jobs:
         context: .
         push: true
         tags: |
-          vank3f3/sub-router:latest
-          vank3f3/sub-router:${{ steps.version.outputs.version }}
+          vank3f3/DeepAI:latest
+          vank3f3/DeepAI:${{ steps.version.outputs.version }}
         cache-from: type=registry,ref=vank3f3/deepAI:buildcache
         cache-to: type=registry,ref=vank3f3/deepAI:buildcache,mode=max
 

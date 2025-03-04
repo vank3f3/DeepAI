@@ -79,7 +79,6 @@ jobs:
 
       - name: Get dependencies
         run: |
-          go mod init github.com/BlueSkyXN/DeepAI
           go mod tidy
 
       - name: Build for ${{ matrix.os }}-${{ matrix.arch }}
