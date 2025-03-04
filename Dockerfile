@@ -46,7 +46,7 @@ WORKDIR /app
 COPY --from=builder /app/deepai .
 
 # 复制配置文件
-COPY config.yaml /app/config.yaml
+COPY config-example.yaml /app/config.yaml
 
 # 创建配置文件目录的挂载点
 VOLUME ["/app/logs"]
