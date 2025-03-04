@@ -1,0 +1,25 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+
+# Logs
+logs/
+*.log
+
+# Build artifacts
+bin/
+dist/
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Other
+README.md
+LICENSE
+*.md
+.DS_Store 

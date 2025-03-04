@@ -1,0 +1,83 @@
+name: Docker Build and Push
+
+on:
+  push:
+    branches: [ main,master ]
+  pull_request:
+    branches: [ main,master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取完整的git历史用于版本计算
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+        
+    - name: Build binary
+      run: |
+        CGO_ENABLED=0 GOOS=linux go build -v -o server ./main.go
+        
+    - name: Generate version
+      id: version
+      run: |
+        # 获取最新的tag
+        git fetch --tags
+        
+        # 检查是否存在tag
+        if git tag -l | grep -q "^v"; then
+          LATEST_TAG=$(git describe --tags --abbrev=0)
+          
+          # 解析版本号
+          MAJOR=$(echo $LATEST_TAG | cut -d. -f1 | sed 's/v//')
+          MINOR=$(echo $LATEST_TAG | cut -d. -f2)
+          PATCH=$(echo $LATEST_TAG | cut -d. -f3)
+          
+          # 增加修订号
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+        else
+          # 首次构建，使用初始版本号
+          NEW_VERSION="v0.1.0"
+          echo "First build, using initial version: ${NEW_VERSION}"
+        fi
+        
+        # 设置新版本号
+        echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+        echo "New version: ${NEW_VERSION}"
+        
+        # 创建新的tag
+        git config --global user.email "github-actions@github.com"
+        git config --global user.name "GitHub Actions"
+        git tag -a ${NEW_VERSION} -m "Release ${NEW_VERSION}"
+        # git push origin ${NEW_VERSION}
+        git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/vank3f3/sub-router.git ${NEW_VERSION}
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Build and push
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: |
+          vank3f3/sub-router:latest
+          vank3f3/sub-router:${{ steps.version.outputs.version }}
+        cache-from: type=registry,ref=vank3f3/deepAI:buildcache
+        cache-to: type=registry,ref=vank3f3/deepAI:buildcache,mode=max
+
+    - name: Image digest
+      run: echo ${{ steps.docker_build.outputs.digest }} 
