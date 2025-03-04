@@ -74,8 +74,8 @@ jobs:
         context: .
         push: true
         tags: |
-          vank3f3/DeepAI:latest
-          vank3f3/DeepAI:${{ steps.version.outputs.version }}
+          vank3f3/deep-ai:latest
+          vank3f3/deep-ai:${{ steps.version.outputs.version }}
         cache-from: type=registry,ref=vank3f3/deepAI:buildcache
         cache-to: type=registry,ref=vank3f3/deepAI:buildcache,mode=max
 
