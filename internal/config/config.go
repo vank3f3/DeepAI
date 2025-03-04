@@ -4,7 +4,30 @@ package config
 type Config struct {
 	ThinkingServices []ThinkingService  `mapstructure:"thinking_services"`
 	Channels         map[string]Channel `mapstructure:"channels"`
-	Global           GlobalConfig       `mapstructure:"global"`
+	Global           struct {
+		Log struct {
+			Level    string `mapstructure:"level"`
+			Format   string `mapstructure:"format"`
+			Output   string `mapstructure:"output"`
+			FilePath string `mapstructure:"file_path"`
+			Debug    struct {
+				Enabled          bool `mapstructure:"enabled"`
+				PrintRequest     bool `mapstructure:"print_request"`
+				PrintResponse    bool `mapstructure:"print_response"`
+				MaxContentLength int  `mapstructure:"max_content_length"`
+			} `mapstructure:"debug"`
+		} `mapstructure:"log"`
+		Server struct {
+			Port         int    `mapstructure:"port"`
+			Host         string `mapstructure:"host"`
+			ReadTimeout  int    `mapstructure:"read_timeout"`
+			WriteTimeout int    `mapstructure:"write_timeout"`
+			IdleTimeout  int    `mapstructure:"idle_timeout"`
+		} `mapstructure:"server"`
+		Model struct {
+			Prefix string `mapstructure:"prefix"` // 新增：模型名前缀配置
+		} `mapstructure:"model"`
+	} `mapstructure:"global"`
 }
 
 type ThinkingService struct {

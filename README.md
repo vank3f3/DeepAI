@@ -177,6 +177,53 @@ DeepAI 通过 `config.yaml` 文件进行配置，请参考示例模板：
 * **global:**  
   - 配置日志和服务器相关参数，建议直接照抄示例。
 
+### 模型前缀配置
+
+DeepAI 支持通过配置文件设置模型名称前缀，用于区分原始 LLM 模型名与 DeepAI 项目的模型名。配置示例：
+
+```yaml
+global:
+  # ... 其他全局配置 ...
+  
+  model:
+    prefix: "deepai-"    # DeepAI项目的模型名前缀
+```
+
+#### 工作原理
+
+1. 当用户在请求中使用带有配置前缀的模型名时（如 "deepai-gpt-3.5-turbo"），系统会：
+   - 自动识别并移除前缀 "deepai-"
+   - 使用实际的模型名（"gpt-3.5-turbo"）调用 LLM 服务
+
+2. 如果用户使用的模型名不包含配置的前缀，则保持原样转发。
+
+#### 使用示例
+
+```bash
+# 使用带前缀的模型名
+curl http://localhost:8888/v1/chat/completions \
+  -H "Authorization: Bearer deep-1-sk-xxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepai-gpt-3.5-turbo",    # 将被转换为 "gpt-3.5-turbo"
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
+
+# 使用原始模型名（不受影响）
+curl http://localhost:8888/v1/chat/completions \
+  -H "Authorization: Bearer deep-1-sk-xxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-3.5-turbo",    # 保持不变
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
+```
+
+这个功能允许您：
+- 在项目中使用自定义的模型命名方式
+- 保持与原始 LLM 接口的兼容性
+- 灵活管理模型名称的映射关系
+
 ## API 使用示例
 
 向 DeepAI 发送聊天完成请求时，通过 `Authorization` 头中包含渠道 ID 来路由请求：

@@ -174,6 +174,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	req.APIKey = apiKey
 
+	// 处理模型名称
+	if strings.HasPrefix(req.Model, s.config.Global.Model.Prefix) {
+		req.Model = strings.TrimPrefix(req.Model, s.config.Global.Model.Prefix)
+	}
+
 	// 获取思考服务
 	thinkingService := s.getWeightedRandomThinkingService()
 	lgr.Log("Using thinking service: %s with API Key: %s", thinkingService.Name, logger.LogAPIKey(thinkingService.APIKey))
