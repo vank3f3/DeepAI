@@ -126,6 +126,115 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	s.forwardModelsRequest(w, r.Context(), req, targetChannel)
 }
 
+// isTestRequest 检查是否为测试请求
+func isTestRequest(req *api.ChatCompletionRequest) bool {
+	if len(req.Messages) == 0 {
+		return false
+	}
+
+	// 获取最后一条消息
+	lastMsg := req.Messages[len(req.Messages)-1]
+
+	// 检查是否为用户消息且内容为测试关键词
+	if lastMsg.Role == "user" {
+		content := strings.TrimSpace(strings.ToLower(lastMsg.Content))
+		return content == "ping" || content == "hi"
+	}
+
+	return false
+}
+
+// generateTestResponse 生成测试请求的响应
+func generateTestResponse(req *api.ChatCompletionRequest) interface{} {
+	// 生成随机ID
+	randomID := func(length int) string {
+		const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		result := make([]byte, length)
+		for i := range result {
+			// 使用当前时间的纳秒部分作为随机源
+			result[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+			// 短暂延迟以确保不同字符
+			time.Sleep(time.Nanosecond)
+		}
+		return string(result)
+	}
+
+	// 根据请求是否为流式返回不同格式的响应
+	if req.Stream {
+		// 返回SSE格式的响应
+		return map[string]interface{}{
+			"id":      fmt.Sprintf("chatcmpl-%s", randomID(29)),
+			"object":  "chat.completion.chunk",
+			"created": time.Now().Unix(),
+			"model":   req.Model,
+			"choices": []map[string]interface{}{
+				{
+					"index": 0,
+					"delta": map[string]interface{}{
+						"role":    "assistant",
+						"content": "DeepAI service is running. This is a fast response for test requests.",
+					},
+					"finish_reason": "stop",
+				},
+			},
+		}
+	} else {
+		// 返回标准格式的响应
+		return map[string]interface{}{
+			"id":      fmt.Sprintf("chatcmpl-%s", randomID(29)),
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   req.Model,
+			"choices": []map[string]interface{}{
+				{
+					"index": 0,
+					"message": map[string]interface{}{
+						"role":    "assistant",
+						"content": "DeepAI service is running. This is a fast response for test requests.",
+					},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     0,
+				"completion_tokens": 0,
+				"total_tokens":      0,
+			},
+		}
+	}
+}
+
+// handleTestRequest 处理测试请求并返回短路响应
+func (s *Server) handleTestRequest(w http.ResponseWriter, req *api.ChatCompletionRequest) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// 生成响应
+	response := generateTestResponse(req)
+
+	// 如果是流式请求，需要特殊处理
+	if req.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+
+		// 发送数据
+		responseJSON, _ := json.Marshal(response)
+		fmt.Fprintf(w, "data: %s\n\n", responseJSON)
+
+		// 发送结束标记
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	} else {
+		// 非流式请求直接返回JSON
+		responseJSON, _ := json.Marshal(response)
+		w.Write(responseJSON)
+	}
+}
+
 // handleChatCompletions 处理聊天补全请求
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -177,6 +286,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 处理模型名称
 	if strings.HasPrefix(req.Model, s.config.Global.Model.Prefix) {
 		req.Model = strings.TrimPrefix(req.Model, s.config.Global.Model.Prefix)
+	}
+
+	// 检查是否为测试请求，如果是则短路处理
+	if isTestRequest(&req) {
+		lgr.Log("Detected test request, providing fast response")
+		s.handleTestRequest(w, &req)
+		return
 	}
 
 	// 获取思考服务
